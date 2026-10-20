@@ -1,0 +1,18 @@
+[project]
+name = "legal-ai-model-gateway"
+version = "0.1.0"
+description = "Local model gateway and isolated runtime-control simulator"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.141.1",
+  "uvicorn==0.52.4",
+  "httpx==0.28.1",
+  "litellm==1.106.0",
+]
+
+[dependency-groups]
+dev = ["pytest==9.1.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

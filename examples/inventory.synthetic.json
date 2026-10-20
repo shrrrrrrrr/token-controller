@@ -1,0 +1,103 @@
+{
+  "source": "synthetic_example_only",
+  "observed_at": null,
+  "received_date": null,
+  "stale": true,
+  "assets": [
+    {
+      "id": "qwen3-32b",
+      "path": "/models/example-qwen",
+      "revision": null,
+      "license": "Verify before use"
+    },
+    {
+      "id": "h3",
+      "path": "/models/example-h3",
+      "revision": null,
+      "license": "Verify before use"
+    }
+  ],
+  "images": [
+    {
+      "reference": "example-vllm-image",
+      "digest": null
+    },
+    {
+      "reference": "example-video-image",
+      "digest": null
+    }
+  ],
+  "instances": [
+    {
+      "name": "example-text",
+      "observed_state": "unknown",
+      "reported_state": "synthetic / not observed",
+      "health": "unknown",
+      "reported_ports": null,
+      "active_tasks": null
+    },
+    {
+      "name": "example-video-single",
+      "observed_state": "unknown",
+      "reported_state": "synthetic / not observed",
+      "health": "unknown",
+      "reported_ports": null,
+      "active_tasks": null
+    },
+    {
+      "name": "example-video-dual",
+      "observed_state": "unknown",
+      "reported_state": "synthetic / not observed",
+      "health": "unknown",
+      "reported_ports": null,
+      "active_tasks": null
+    }
+  ],
+  "gpus": [
+    {
+      "index": 0,
+      "uuid": null,
+      "total_mib": null,
+      "free_mib": null,
+      "reported_used_mib": null,
+      "reported_utilization": null,
+      "health": "unknown",
+      "source": "synthetic fixture, no hardware observation"
+    },
+    {
+      "index": 1,
+      "uuid": null,
+      "total_mib": null,
+      "free_mib": null,
+      "reported_used_mib": null,
+      "reported_utilization": null,
+      "health": "unknown",
+      "source": "synthetic fixture, no hardware observation"
+    },
+    {
+      "index": 2,
+      "uuid": null,
+      "total_mib": null,
+      "free_mib": null,
+      "reported_used_mib": null,
+      "reported_utilization": null,
+      "health": "unknown",
+      "source": "synthetic fixture, no hardware observation"
+    },
+    {
+      "index": 3,
+      "uuid": null,
+      "total_mib": null,
+      "free_mib": null,
+      "reported_used_mib": null,
+      "reported_utilization": null,
+      "health": "unknown",
+      "source": "synthetic fixture, no hardware observation"
+    }
+  ],
+  "unknowns": [
+    "Upstream health/authentication",
+    "GPU capacity and task activity",
+    "Application dependencies"
+  ]
+}

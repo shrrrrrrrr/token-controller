@@ -15,6 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .catalog import PROFILES, evidence, inventory
 from .providers import DemoText, LiteLLMText, verified_usage
+from .project_tools import configured_tools
 from .store import Fault, Store, canonical, uid
 
 STATIC = Path(__file__).parent / "static"
@@ -149,7 +150,7 @@ class Service:
         await self.control("/tick")
 
 
-def create_app(store=None, provider=None, control_url=None, control_token=None, control_transport=None, background=True):
+def create_app(store=None, provider=None, control_url=None, control_token=None, control_transport=None, background=True, project_tools_path=None):
     store = store or Store(Path(__file__).parents[1] / ".state" / "gateway.sqlite")
     provider = provider or DemoText()
     service = Service(store, provider, control_url, control_token, control_transport)
@@ -174,7 +175,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
             with suppress(asyncio.CancelledError):
                 await task
 
-    app = FastAPI(title="法律+AI 模型网关 · Local MVP", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="项目组模型平台 · Local MVP", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.service, app.state.store = service, store
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
 
@@ -194,9 +195,11 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
                     return JSONResponse({"error": {"code": "body_too_large"}}, status_code=413)
             request._body = bytes(raw)
         response = await call_next(request)
+        tool_origins = sorted({t['origin'] for t in configured_tools(project_tools_path) if t['embed']})
+        frame_source = ' '.join(tool_origins) if tool_origins else "'none'"
         response.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                                  "Referrer-Policy": "no-referrer",
-                                 "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"})
+                                 "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src "+frame_source+"; frame-ancestors 'none'; base-uri 'none'"})
         return response
 
     @app.exception_handler(Fault)
@@ -248,6 +251,10 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         user, key = dict(who["user"]), dict(who["key"])
         key.pop("hash")
         return {"user": user, "key": key, "text_source": provider.source}
+
+    @app.get('/api/project-tools')
+    def project_tools(who=Depends(identity)):
+        return {'tools': configured_tools(project_tools_path), 'credentials_forwarded': False}
 
     @app.post("/api/local/shutdown")
     def shutdown(who=Depends(roles("admin"))):

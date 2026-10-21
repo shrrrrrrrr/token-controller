@@ -16,6 +16,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .catalog import PROFILES, evidence, inventory
 from .providers import DemoText, LiteLLMText, verified_usage
 from .project_tools import configured_tools
+from .guide import account_guide, guide_target
+from .release import UI_VERSION
 from .store import Fault, Store, canonical, uid
 
 STATIC = Path(__file__).parent / "static"
@@ -24,6 +26,10 @@ MANAGERS = {"admin", "operator", "auditor"}
 
 class Input(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class GuideAck(Input):
+    version: str = Field(min_length=1, max_length=30)
 
 
 class Message(Input):
@@ -242,6 +248,10 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     def css():
         return FileResponse(STATIC / "style.css", media_type="text/css")
 
+    @app.get('/workspace.css')
+    def workspace_css():
+        return FileResponse(STATIC / 'workspace.css', media_type='text/css')
+
     @app.get("/fonts/ChillReunion-Round.woff2")
     def ui_font():
         return FileResponse(STATIC / "fonts" / "ChillReunion-Round.woff2", media_type="font/woff2")
@@ -259,6 +269,24 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     @app.get('/api/project-tools')
     def project_tools(who=Depends(identity)):
         return {'tools': configured_tools(project_tools_path), 'credentials_forwarded': False}
+
+    @app.get('/api/guide')
+    def guide(who=Depends(identity)):
+        return account_guide(store, who, provider.source)
+
+    @app.post('/api/guide/ack')
+    def acknowledge_guide(body: GuideAck, who=Depends(identity)):
+        if body.version != UI_VERSION:
+            raise Fault('guide_version_changed', 409)
+        target = guide_target(who['user']['role'])
+        with store.tx() as db:
+            if not db.execute("SELECT id FROM audit WHERE actor=? AND action='guide.ack' AND target=? LIMIT 1", (who['user']['id'], target)).fetchone():
+                store.audit(db, who['user']['id'], 'guide.ack', target, dict(version=UI_VERSION, role=who['user']['role']))
+        return {'version': UI_VERSION, 'acknowledged': True}
+
+    @app.get('/decorations.svg')
+    def decorations():
+        return FileResponse(STATIC / 'decorations.svg', media_type='image/svg+xml')
 
     @app.post("/api/local/shutdown")
     def shutdown(who=Depends(roles("admin"))):

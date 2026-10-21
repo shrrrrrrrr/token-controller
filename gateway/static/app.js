@@ -6,8 +6,10 @@ const pretty = x => esc(JSON.stringify(x,null,2));
 const num = x => Number(x || 0).toLocaleString('zh-CN');
 const date = t => t ? new Date(t*1000).toLocaleString('zh-CN',{hour12:false}) : '未采集';
 
-const pageLabels = {overview:'工作台',assets:'模型资产',runtime:'运行管理',play:'调用与任务',tools:'项目工具',users:'成员与额度',usage:'用量记录',connect:'接入指南'};
+const pageLabels = {overview:'工作台',assets:'模型资产',runtime:'运行管理',play:'调用与任务',tools:'项目工具',users:'成员与额度',usage:'用量记录',connect:'接入指南',guide:'使用引导'};
+let renderSequence=0;
 const icons = {
+ guide:'<path d="M4 4h6l2 2 2-2h6v16h-6l-2 2-2-2H4V4Zm8 2v16M7 9h2M15 9h2M7 13h2M15 13h2"/>',
  overview:'<path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/>',
  assets:'<path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/>',
  runtime:'<rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01M16 7h2M16 17h2"/>',
@@ -33,9 +35,9 @@ const notice = text => `<div class="notice"><span class="notice-symbol">ⓘ</spa
 function table(head,rows){return `<div class="table-wrap"><table><thead><tr>${head.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${rows.length?rows.map(x=>`<tr>${x.map(y=>`<td>${y}</td>`).join('')}</tr>`).join(''):`<tr><td colspan="${head.length}"><div class="empty">暂无记录 · 执行一次授权操作后在这里查看</div></td></tr>`}</tbody></table></div>`}
 function panel(title,body,sub=''){return `<section class="panel"><div class="panel-head"><h2>${title}</h2><small>${sub}</small></div>${body}</section>`}
 const field = (label,name,type='text',value='',extra='') => `<div class="field"><label for="${name}">${label}</label><input id="${name}" name="${name}" type="${type}" value="${esc(value)}" ${extra}></div>`;
-function nav(){const manager=['admin','operator','auditor'].includes(me?.user.role);const ids=manager?['overview','assets','runtime','play','tools','users','usage','connect']:['play','tools','usage','connect'];$('#nav').innerHTML=ids.map(id=>`<button class="nav-item ${page===id?'active':''}" data-page="${id}" ${page===id?'aria-current="page"':''}>${icon(id)}<span>${pageLabels[id]}</span>${page===id?'<span class="nav-arrow" aria-hidden="true">↗</span>':''}</button>`).join('');document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.page)));$('#environment-detail').innerHTML=me.text_source==='simulation'?'文本与运行控制均为模拟<br>真实模型启停已关闭':'文本上游已配置<br>运行控制仍为模拟';$('#current-page').textContent=pageLabels[page]||'工作台';$('#identity').textContent=me?`${me.user.name} · ${roleName[me.user.role]}`:'未登录'}
+function nav(){const manager=['admin','operator','auditor'].includes(me?.user.role);const ids=guideInfo?.allowed_pages||['play','tools','usage','connect','guide'];$('#nav').innerHTML=ids.map(id=>`<button class="nav-item ${page===id?'active':''}" data-page="${id}" ${page===id?'aria-current="page"':''}>${icon(id)}<span>${pageLabels[id]}</span>${page===id?'<span class="nav-arrow" aria-hidden="true">↗</span>':''}</button>`).join('');document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.page)));$('#environment-detail').innerHTML=me.text_source==='simulation'?'文本与运行控制均为模拟<br>真实模型启停已关闭':'文本上游已配置<br>运行控制仍为模拟';$('#release-label').textContent='LOCAL EDITION / '+guideInfo.version;$('#open-guide').innerHTML='使用引导'+(guideInfo.needs_attention?'<span class="guide-new">新</span>':'');$('#current-page').textContent=pageLabels[page]||'工作台';$('#identity').textContent=me?`${me.user.name} · ${roleName[me.user.role]}`:'未登录'}
 async function action(button,fn){button.disabled=true;try{await fn()}catch(e){toast(e.message,true)}finally{button.disabled=false}}
-function login(){me=null;key='';document.body.classList.add('signed-out');closeMenu();$('#identity').textContent='未登录';$('#current-page').textContent='欢迎';$('#nav').innerHTML='';$('#main').innerHTML=`<div class="login"><section class="login-story" aria-label="平台介绍"><div><div class="eyebrow">GROUP MODEL SPACE</div><h1>让模型成为<br>项目组的共同工具</h1><p>一处连接模型、调用与项目工具，<br>为每一次探索留出清晰的空间</p></div>${pixelRack()}<div class="login-features"><span>独立访问凭证</span><span>共享模型资源</span><span>可追踪的用量</span></div></section><section class="login-form-side"><div class="eyebrow">WELCOME TO YOUR WORKSPACE</div><h2>进入工作空间</h2><p class="subtitle">使用管理员分配的 API Key 访问</p><form id="login-form"><div class="field"><label for="login-key">API Key</label><input id="login-key" type="password" placeholder="输入你的独立 Key" autocomplete="off" spellcheck="false" required><span class="field-help">仅保存在当前页面内存中，刷新后需重新登录</span></div><button class="primary" type="submit">进入工作台 <span aria-hidden="true">→</span></button><p id="login-error" class="field-help" role="alert"></p></form><details><summary>首次使用与管理员初始化</summary><p>在本机 PowerShell 的 token-controller 目录，使用虚拟环境 Python 执行 <code>python -m gateway bootstrap</code>。已有管理员丢失 Key 时执行 <code>python -m gateway recover-admin</code>。完整步骤见项目 README</p></details><p class="login-footnote">本地演示 · 默认模拟文本与运行控制</p></section></div>`;$('#login-form').addEventListener('submit',e=>{e.preventDefault();action(e.submitter,async()=>{key=$('#login-key').value.trim();try{me=await api('/api/me');document.body.classList.remove('signed-out');page=['admin','operator','auditor'].includes(me.user.role)?'overview':'play';await render()}catch(error){key='';$('#login-error').textContent=error.message;throw error}})})}
+function login(){renderSequence++;workspaceObserver?.disconnect();guideInfo=null;me=null;key='';delete $('#main').dataset.page;document.body.classList.add('signed-out');closeMenu();$('#identity').textContent='未登录';$('#current-page').textContent='欢迎';$('#nav').innerHTML='';$('#main').innerHTML=`<div class="login"><section class="login-story" aria-label="平台介绍"><div><div class="eyebrow">GROUP MODEL SPACE</div><h1>让模型成为<br>项目组的共同工具</h1><p>一处连接模型、调用与项目工具，<br>为每一次探索留出清晰的空间</p></div>${pixelRack()}<div class="login-features"><span>独立访问凭证</span><span>共享模型资源</span><span>可追踪的用量</span></div></section><section class="login-form-side"><div class="eyebrow">WELCOME TO YOUR WORKSPACE</div><h2>进入工作空间</h2><p class="subtitle">使用管理员分配的 API Key 访问</p><form id="login-form"><div class="field"><label for="login-key">API Key</label><input id="login-key" type="password" placeholder="输入你的独立 Key" autocomplete="off" spellcheck="false" required><span class="field-help">仅保存在当前页面内存中，刷新后需重新登录</span></div><button class="primary" type="submit">进入工作台 <span aria-hidden="true">→</span></button><p id="login-error" class="field-help" role="alert"></p></form><details><summary>首次使用与管理员初始化</summary><p>在本机 PowerShell 的 token-controller 目录，使用虚拟环境 Python 执行 <code>python -m gateway bootstrap</code>。已有管理员丢失 Key 时执行 <code>python -m gateway recover-admin</code>。完整步骤见项目 README</p></details><p class="login-footnote">本地演示 · 默认模拟文本与运行控制</p></section></div>`;$('#login-form').addEventListener('submit',e=>{e.preventDefault();action(e.submitter,async()=>{key=$('#login-key').value.trim();try{me=await api('/api/me');document.body.classList.remove('signed-out');guideInfo=await api('/api/guide');guideStep=0;page=guideInfo.needs_attention?'guide':(['admin','operator','auditor'].includes(me.user.role)?'overview':'play');await render()}catch(error){key='';$('#login-error').textContent=error.message;throw error}})})}
 async function overview(){const [inv,usage]=await Promise.all([api('/api/inventory'),api('/api/usage')]);const simulation=me.text_source==='simulation';const pending=usage.requests.filter(x=>x.status==='reconciliation').length;return top('模型工作台','查看共享资源，开始一次调用，或进入你的项目工具','OVERVIEW')+`<section class="hero" aria-labelledby="hero-title"><div><div class="eyebrow">ONE SPACE, SHARED POSSIBILITIES</div><h2 id="hero-title">把算力连接起来，把想法继续下去</h2><p>模型调用、访问权限与项目工具，在同一个工作空间里协作</p><div class="buttons"><button class="primary" data-go="play">发起一次调用 <span aria-hidden="true">→</span></button><button class="secondary" data-go="connect">查看接入指南</button></div></div>${pixelRack()}</section><div class="metrics"><div class="metric"><label>已登记模型权重</label><div class="value">${num(inv.assets.length)}<span>项</span></div><small>登记数量不代表在线服务数量</small></div><div class="metric"><label>当前文本来源</label><div class="value">${simulation?'模拟':'已配置'}<span>${simulation?'本地演示':'需健康核验'}</span></div><small>${simulation?'未调用真实模型':'已配置上游，健康状态另行核验'}</small></div><div class="metric"><label>我的可用额度</label><div class="value">${num(me.user.budget-me.user.spent-me.user.reserved)}<span>点</span></div><small>预留 ${num(me.user.reserved)} 点 · 非电费</small></div><div class="metric"><label>最近请求待对账</label><div class="value">${num(pending)}<span>项</span></div><small>最近 50 条 · 保留记录等待核验</small></div></div>`+notice('当前资产来自'+(inv.source==='synthetic_example_only'?'合成示例':'登记快照')+'，不代表服务器实时状态。运行管理为模拟演练，不会启停真实模型')+panel('模型与服务',table(['实例','登记状态','API 健康','数据说明'],inv.instances.map(x=>[`<strong class="mono">${esc(x.name)}</strong>`,esc(x.reported_state),badge('unknown'),'<span class="muted">登记快照 · 非实时</span>'])),'MODEL INVENTORY')+`<div class="two-col">${panel('GPU 资源概况',`<div class="gpu-grid">${inv.gpus.map(g=>`<div class="gpu"><div class="gpu-top"><strong>GPU ${esc(g.index)}</strong>${badge('unknown')}</div><div class="memory">规格与显存待采集</div><small>未取得当前服务器监控数据</small><div class="unknown-bar" aria-hidden="true"></div></div>`).join('')}</div>`,'OBSERVATION PENDING')}${panel('从这里开始',`<div class="panel-body"><div class="step"><span>01</span><div>调用模型<small>使用已授权模型，验证回复与用量记录</small></div></div><div class="step"><span>02</span><div>连接你的客户端<small>查看地址、模型 ID 与当前协议边界</small></div></div><div class="step"><span>03</span><div>进入项目工具<small>法律等已有应用，保留各自的身份与数据边界</small></div></div><div class="buttons spacer"><button class="secondary" data-go="tools">打开项目工具 ↗</button></div></div>`,'QUICK START')}</div>`}
 async function assets(){const [inv,ev]=await Promise.all([api('/api/inventory'),api('/api/evidence')]);return top('资产与证据','权重、镜像、启动配置与容器分别登记；仅展示合成示例或本地私有快照，未知值明确标注。','ASSETS / EVIDENCE')+notice(`<strong>公开示例核验：</strong>${ev.checks.filter(x=>x.match).length} / ${ev.checks.length} 个公开合成配置 hash 与基线相符。真实资产文件请放在本地忽略目录中。`)+panel('模型权重',table(['资产','宿主路径','固定版本 / revision','许可'],inv.assets.map(x=>[esc(x.id),`<span class="mono">${esc(x.path)}</span>`,`<span class="mono">${esc(x.revision||'未记录固定revision')}</span>`,esc(x.license)])))+panel('容器实例 · 包含已停止项',table(['容器','报告状态','入口','采集状态'],inv.instances.map(x=>[`<span class="mono">${esc(x.name)}</span>`,esc(x.reported_state),`<span class="mono">${esc(x.reported_ports)}</span>`,badge('unknown')])),'SYNTHETIC FIXTURE')+panel('启动配置与固定指纹',table(['Profile','GPU / 入口','引擎','配置 hash / 镜像'],inv.profiles.map(p=>[`<strong class="mono">${esc(p.id)}</strong><small>真实操作待审批；模拟器使用固定白名单</small>`,`GPU ${p.gpus.join(' / ')}<small>端口 ${p.port}</small>`,esc(p.engine),`<span class="mono">${esc(p.hash)}</span><small class="mono">${esc(p.image)}</small>`])))+panel('仍需核实',`<div class="panel-body">${inv.unknowns.map(x=>`<div class="step"><span>○</span>${esc(x)}</div>`).join('')}</div>`)+`<details><summary>查看合成示例 hash 明细</summary><pre>${pretty(ev)}</pre></details>`}
 async function runtime(){const r=await api('/api/runtime');return top('运行管理','策略与实际状态分开。操作只发送到本机模拟控制代理，真实启停始终关闭。','RUNTIME / SIMULATION')+notice('<strong>模拟演练：</strong>Qwen 常驻保护；H3 单卡与双卡配置共用 GPU 2 和 30010 端口。切换先排空在途任务，失败恢复原路由。')+panel('模拟运行状态',table(['模型 / alias','当前 profile','观察状态','期望状态 / 策略'],r.routes.map(x=>[esc(x.model),`<span class="mono">sim-${esc(x.profile)}</span>`,badge(x.draining?'draining':r.instances.find(i=>i.profile===x.profile)?.status),`${esc(x.desired)}<small>${esc(x.policy)} · 自动调度关闭</small>`])))+`<div class="two-col equal">${panel('配置操作演练',`<form id="runtime-form" class="panel-body"><div class="field"><label for="runtime-profile">预置配置</label><select id="runtime-profile"><option value="h3-sp2-v1">H3 · 双卡 SP2 + AdaLN · GPU 2/3</option><option value="h3-single-v1">H3 · 单卡省显存 · GPU 2</option><option value="qwen-tp2-v1">Qwen · 常驻保护（操作会拒绝）</option></select></div><div class="field"><label for="runtime-action">动作</label><select id="runtime-action"><option value="start">启动模拟实例</option><option value="switch">安全切换（等待在途任务）</option><option value="stop">停止模拟实例</option></select></div><button class="primary" type="submit">提交模拟操作 →</button><p class="field-help spacer">没有 GPU/镜像/任意命令输入框。操作员只能选择被授权的 profile。</p></form>`)}${panel('生命周期策略',`<form id="policy-form" class="panel-body"><div class="field"><label for="policy-value">H3 期望策略</label><select id="policy-value"><option value="manual">人工管理 manual</option><option value="on_demand">按需 on_demand</option><option value="always_on">常驻保护 always_on</option><option value="idle_stop">允许空闲停止 idle_stop</option></select></div><p class="small muted">此处保存策略意图。MVP 不自动冷启动或空闲停止；需要操作员发起模拟动作。真实 GPU 策略不受影响。</p><button class="secondary spacer" type="submit">保存策略意图</button></form>`)}</div>`+panel('操作记录',table(['操作 ID','动作 / 目标','结果','说明'],r.operations.map(o=>[`<span class="mono">${esc(o.id)}</span><small>${date(o.created)}</small>`,`${esc(o.action)}<small class="mono">${esc(o.target)}</small>`,badge(o.status),esc(o.detail)])),'SIMULATED OPERATIONS')}
@@ -53,7 +55,7 @@ function bind(){const refresh=$('#refresh');if(refresh)refresh.addEventListener(
  };Object.entries(forms).forEach(([id,fn])=>{const form=$('#'+id);if(form)form.addEventListener('submit',e=>{e.preventDefault();action(e.submitter,fn)})});$('#qwen-probe')?.addEventListener('click',e=>action(e.target,async()=>{const r=await api('/api/qwen/probe','POST',{});toast('只读探测通过：'+r.model)}));$('#new-chat-id')?.addEventListener('click',()=>$('#chat-id').value=crypto.randomUUID());document.querySelectorAll('[data-cancel]').forEach(b=>b.addEventListener('click',()=>action(b,async()=>{await api('/v1/videos/'+b.dataset.cancel+'/cancel','POST',{});toast('排队任务已取消，额度已退回');await render()})));document.querySelectorAll('[data-revoke]').forEach(b=>b.addEventListener('click',()=>action(b,async()=>{await api('/api/keys/'+b.dataset.revoke,'DELETE');toast('Key 已吊销');await render()})));document.querySelectorAll('[data-download]').forEach(b=>b.addEventListener('click',()=>action(b,async()=>{const r=await fetch('/v1/videos/'+b.dataset.download+'/content',{headers:{Authorization:'Bearer '+key}});if(!r.ok)throw new Error('下载权限检查失败');const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=b.dataset.download+'-simulation.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)})))}
 function grantEditor(users){return panel('更新已有用户的权限与状态',`<form id="grant-form" class="panel-body"><div class="form-grid"><div class="field"><label for="grant-user">用户</label><select id="grant-user">${users.map(u=>`<option value="${esc(u.id)}" data-role="${esc(u.role)}" data-active="${u.active}" data-models="${esc(u.models)}" data-profiles="${esc(u.profiles)}">${esc(u.name)}</option>`).join('')}</select></div><div class="field"><label for="grant-role">角色</label><select id="grant-role"><option value="caller">普通调用者</option><option value="operator">运行操作员</option><option value="auditor">只读审计员</option><option value="admin">平台管理员</option></select></div><div class="field"><label for="grant-active">账号状态</label><select id="grant-active"><option value="1">启用</option><option value="0">停用</option></select></div></div><div class="checkline"><label><input type="checkbox" id="grant-qwen">Qwen 调用</label><label><input type="checkbox" id="grant-h3">H3 调用</label><label><input type="checkbox" id="grant-single">单卡运行权限</label><label><input type="checkbox" id="grant-dual">双卡运行权限</label></div><button class="secondary" type="submit">保存权限与状态</button><p class="field-help spacer">Key 的有效模型为用户授权与 Key 授权的交集。撤回授权立即生效；不能停用当前管理员。</p></form>`)}
 function bindGrants(){const f=$('#grant-form');if(!f)return;function load(){const o=$('#grant-user').selectedOptions[0];$('#grant-role').value=o.dataset.role;$('#grant-active').value=o.dataset.active;const m=JSON.parse(o.dataset.models),p=JSON.parse(o.dataset.profiles);$('#grant-qwen').checked=m.includes('qwen3-32b');$('#grant-h3').checked=m.includes('h3');$('#grant-single').checked=p.includes('h3-single-v1');$('#grant-dual').checked=p.includes('h3-sp2-v1')}$('#grant-user').addEventListener('change',load);load();f.addEventListener('submit',e=>{e.preventDefault();action(e.submitter,async()=>{await api('/api/users/'+$('#grant-user').value,'PATCH',{role:$('#grant-role').value,active:$('#grant-active').value==='1',models:[$('#grant-qwen').checked?'qwen3-32b':null,$('#grant-h3').checked?'h3':null].filter(Boolean),profiles:[$('#grant-single').checked?'h3-single-v1':null,$('#grant-dual').checked?'h3-sp2-v1':null].filter(Boolean)});toast('权限已更新');await render()})})}
-async function render(){try{me=await api('/api/me');nav();const views={overview,assets,runtime,play,tools:projectTools,users,usage,connect};$('#main').innerHTML=await views[page]();bind();bindGrants();document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.go)));$('#copy-base')?.addEventListener('click',e=>action(e.currentTarget,async()=>{try{await navigator.clipboard.writeText(location.origin+'/v1');toast('API 地址已复制')}catch{toast('无法自动复制，请选中地址手动复制',true)}}))}catch(e){toast(e.message,true)}}
+async function render(){const sequence=++renderSequence;try{const identity=await api('/api/me');const guide=await api('/api/guide');if(sequence!==renderSequence)return;me=identity;if(guideInfo?.version!==guide.version||guideInfo?.role!==guide.role)guideStep=0;guideInfo=guide;if(!guideInfo.allowed_pages.includes(page))page='guide';nav();const views={overview,assets,runtime,play,tools:projectTools,users,usage,connect,guide:accountGuide};const html=await views[page]();if(sequence!==renderSequence)return;$('#main').innerHTML=html;mountWorkspace();bind();bindGrants();bindGuide();bindRoleControls();document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.go)));$('#copy-base')?.addEventListener('click',e=>action(e.currentTarget,async()=>{try{await navigator.clipboard.writeText(location.origin+'/v1');toast('API 地址已复制')}catch{toast('无法自动复制，请选中地址手动复制',true)}}))}catch(e){if(sequence===renderSequence)toast(e.message,true)}}
 async function projectTools(){const result=await api('/api/project-tools');return top('项目工具','统一进入项目组已有应用。每个工具保留自己的登录和数据边界。','GROUP / TOOLS')+notice('平台 API Key 不会发送给工具网站。内嵌仍取决于原站证书与防嵌入策略；如内嵌受限，请使用“在原站打开”。')+(result.tools.length?result.tools.map(t=>panel(esc(t.title),`<div class="panel-body"><p class="small muted">${esc(t.description)}</p><div class="buttons spacer"><a class="primary" href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">在原站打开 ↗</a><span class="badge warn">连接状态待验证</span></div>${t.embed?`<iframe class="tool-frame" src="${esc(t.url)}" title="${esc(t.title)}" referrerpolicy="no-referrer" sandbox="allow-forms allow-scripts allow-same-origin allow-downloads allow-popups" loading="lazy"></iframe>`:''}<p class="field-help spacer">项目门户仅提供入口，不会替原站认证或把本机地址自动变为公网地址。</p></div>`,'PRIVATE LOCAL CONFIG')).join(''):panel('配置项目工具',`<div class="panel-body"><p>本机尚未登记工具。管理员可将地址配置到忽略目录中的 <code>.state/project-tools.local.json</code>，格式见 README。真实站点地址不要写入公开示例。</p></div>`))}
 
 async function connect(){const models=await api('/v1/models');return top('接入指南','把工作空间中的模型连接到客户端或自己的程序','CONNECT')+notice('当前仅支持非流式 Chat Completions，暂不支持完整工具调用、Responses 与 Anthropic Messages。以下是配置说明，不代表 Agent 客户端已经通过兼容验证')+`<div class="two-col equal">${panel('你的 API 连接',`<div class="panel-body"><div class="connection-row"><span>Base URL</span><code>${esc(location.origin)}/v1</code></div><div class="connection-row"><span>协议</span><code>OpenAI Chat Completions</code></div><div class="connection-row"><span>当前文本来源</span><span>${me.text_source==='simulation'?'本地模拟':'已配置真实上游'}</span></div><div class="connection-row"><span>已授权模型 ID</span><code>${models.data.map(m=>esc(m.id)).join('<br>')||'暂无授权模型'}</code></div><div class="buttons spacer"><button id="copy-base" class="secondary">复制 API 地址</button><button class="primary" data-go="play">试一次调用 →</button></div><p class="field-help spacer">API Key 使用管理员发给你的调用凭证。出于安全考虑，本页不回显完整 Key</p></div>`,'CONNECTION')}${panel('DeepSeek Harness 配置',`<div class="panel-body"><p class="small">在 Settings → Models 中选择 Add model provider，再选择 Custom model API</p><div class="step"><span>01</span><div>地址与协议<small>Base URL 填左侧地址，协议选 OpenAI Chat Completions</small></div></div><div class="step"><span>02</span><div>凭证与模型<small>使用成员调用 Key，模型 ID 与左侧授权列表一致</small></div></div><div class="step"><span>03</span><div>等待完整协议适配<small>流式输出、工具调用与取消计量尚待实现，当前不保证完整 Agent 任务可用</small></div></div><p class="field-help spacer">本机地址只对运行平台的这台电脑有效。正式域名上线后，使用管理员公布的 HTTPS 地址</p></div>`,'CLIENT SETUP')}</div>`}
@@ -61,4 +63,136 @@ $('#menu-toggle').addEventListener('click',()=>{const opened=document.body.class
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.body.classList.contains('menu-open')){closeMenu();$('#menu-toggle').focus()}});
 document.addEventListener('click',e=>{if(document.body.classList.contains('menu-open')&&!e.target.closest('#sidebar')&&!e.target.closest('#menu-toggle'))closeMenu()});
 
+// Tabs move the existing nodes instead of re-rendering, preserving form values.
+const workspaceTabs = new Map();
+let workspaceObserver;
+function bindRoleControls(){
+  document.querySelectorAll('[data-go]').forEach(button=>{if(!guideInfo.allowed_pages.includes(button.dataset.go)){button.disabled=true;button.title='当前角色没有此功能权限'}});
+  if(me.user.role!=='admin')document.querySelectorAll('#policy-form input,#policy-form select,#policy-form button').forEach(control=>{control.disabled=true;control.title='生命周期策略由管理员维护'});
+  if(me.user.role==='auditor')document.querySelectorAll('#runtime-form input,#runtime-form select,#runtime-form button').forEach(control=>{control.disabled=true;control.title='审计员只读查看运行记录'});
+  const probe=$('#qwen-probe');if(probe&&!['admin','operator'].includes(me.user.role)){probe.disabled=true;probe.title='上游探测由管理员或运行操作员执行'};
+}
+
+function mountWorkspace(){
+  const root = $('#main');
+  root.dataset.page = page;
+  const panels = [...root.querySelectorAll('.panel')];
+  if(!panels.length)return;
+  const heading = root.querySelector('.page-top');
+  const notices = [...root.querySelectorAll(':scope > .notice')];
+  const prefix = page==='overview'?[root.querySelector('.hero'),root.querySelector('.metrics')].filter(Boolean):[];
+  const extra = [...root.querySelectorAll(':scope > details')];
+  for(const detail of extra){
+    const panelNode=document.createElement('section');panelNode.className='panel';
+    const title=document.createElement('div');title.className='panel-head';
+    const h=document.createElement('h2');h.textContent='配置核验详情';title.append(h);
+    const body=document.createElement('div');body.className='panel-body';body.append(detail);detail.open=true;
+    panelNode.append(title,body);panels.push(panelNode);
+  }
+  const stage=document.createElement('div');stage.className='desktop-stage';
+  const tabs=document.createElement('div');tabs.className='workspace-tabs';tabs.setAttribute('role','tablist');tabs.setAttribute('aria-label','页面功能');
+  const panes=document.createElement('div');panes.className='workspace-panes';
+  const buttons=[];
+  const selectTab=(index,focus=false)=>{
+    workspaceTabs.set(page,index);
+    buttons.forEach((button,i)=>{button.setAttribute('aria-selected',String(i===index));button.tabIndex=i===index?0:-1;panels[i].hidden=i!==index});
+    if(focus)buttons[index].focus();
+    requestAnimationFrame(()=>paginateVisibleTables());
+  };
+  panels.forEach((node,index)=>{
+    const button=document.createElement('button');button.type='button';button.id=`workspace-tab-${index}`;
+    button.textContent=node.querySelector('h2')?.textContent||`功能 ${index+1}`;
+    button.setAttribute('role','tab');button.setAttribute('aria-controls',`workspace-pane-${index}`);
+    node.id=`workspace-pane-${index}`;node.setAttribute('role','tabpanel');node.setAttribute('aria-labelledby',button.id);node.tabIndex=0;
+    button.addEventListener('click',()=>selectTab(index));
+    button.addEventListener('keydown',event=>{
+      let next=index;
+      if(event.key==='ArrowRight')next=(index+1)%panels.length;
+      else if(event.key==='ArrowLeft')next=(index+panels.length-1)%panels.length;
+      else if(event.key==='Home')next=0;
+      else if(event.key==='End')next=panels.length-1;
+      else return;
+      event.preventDefault();selectTab(next,true);
+    });
+    buttons.push(button);tabs.append(button);panes.append(node);
+  });
+  stage.append(tabs,panes);
+  const nodes=[heading,...prefix];
+  if(notices.length){
+    const hint=document.createElement('details');hint.className='workspace-hint';
+    const summary=document.createElement('summary');summary.textContent='页面说明与当前限制';
+    const content=document.createElement('div');content.className='workspace-hint-content';content.append(...notices);
+    hint.append(summary,content);nodes.push(hint);
+  }
+  root.replaceChildren(...nodes.filter(Boolean),stage);
+  panels.forEach(node=>node.querySelectorAll('.table-wrap').forEach(installTablePager));
+  selectTab(Math.min(workspaceTabs.get(page)||0,panels.length-1));
+  workspaceObserver?.disconnect();
+  if(typeof ResizeObserver!=='undefined'){
+    workspaceObserver=new ResizeObserver(()=>paginateVisibleTables());workspaceObserver.observe(stage);
+  }
+}
+
+const tablePagers = new WeakMap();
+function installTablePager(wrap){
+  const rows=[...wrap.querySelectorAll('tbody > tr')];
+  if(!rows.length||wrap.querySelector('.empty'))return;
+  const controls=document.createElement('div');controls.className='table-pager';
+  controls.innerHTML='<span class="pager-label" aria-live="polite"></span><div><button class="secondary" type="button" aria-label="上一页">←</button><button class="secondary" type="button" aria-label="下一页">→</button></div>';
+  wrap.after(controls);
+  const [prev,next]=controls.querySelectorAll('button');
+  const state={rows,index:0,size:5,controls};tablePagers.set(wrap,state);
+  const draw=()=>{
+    const pages=Math.max(1,Math.ceil(rows.length/state.size));state.index=Math.min(state.index,pages-1);
+    rows.forEach((row,i)=>{row.hidden=i<state.index*state.size||i>=(state.index+1)*state.size});
+    controls.querySelector('.pager-label').textContent=`${state.index*state.size+1}–${Math.min((state.index+1)*state.size,rows.length)} / ${rows.length} 条`;
+    prev.disabled=state.index===0;next.disabled=state.index>=pages-1;
+  };
+  state.draw=draw;
+  prev.addEventListener('click',()=>{state.index--;draw()});next.addEventListener('click',()=>{state.index++;draw()});
+  draw();
+}
+function paginateVisibleTables(){
+  $('#main').querySelectorAll('.panel:not([hidden]) .table-wrap').forEach(wrap=>{
+    const state=tablePagers.get(wrap);if(!state)return;
+    const desktop=matchMedia('(min-width: 1000px) and (min-height: 650px)').matches;
+    if(!desktop){state.size=5;state.draw();return}
+    const height=wrap.clientHeight;if(!height)return;
+    state.rows.forEach(row=>{row.hidden=false});
+    const head=wrap.querySelector('thead')?.getBoundingClientRect().height||40;
+    let consumed=head+6,size=0;
+    for(const row of state.rows){const rowHeight=row.getBoundingClientRect().height;if(consumed+rowHeight>height&&size>0)break;consumed+=rowHeight;size++}
+    state.size=Math.max(1,size);state.draw();
+  });
+}
+
+let guideInfo=null,guideStep=0;
+function guideStepBody(){
+  const step=guideInfo.steps[guideStep];
+  return `<div class="eyebrow">STEP ${String(guideStep+1).padStart(2,'0')} / ${String(guideInfo.steps.length).padStart(2,'0')}</div><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p><button id="guide-target" class="secondary">前往${esc(pageLabels[step.target]||'对应功能')} ↗</button>`;
+}
+async function accountGuide(){
+  return top('你的使用引导',`${guideInfo.role_name} · v${guideInfo.version} · 功能与引导随版本一起更新`,'YOUR WORKSPACE GUIDE')+
+    panel('从你的角色开始',`<div class="panel-body guide-body"><div class="guide-summary"><span class="badge good">${esc(guideInfo.role_name)}</span><span>${guideInfo.models.length?'当前获授模型：'+esc(guideInfo.models.join(' / ')):'当前没有模型调用权限'}</span></div><div class="guide-wizard"><div class="guide-step-list" aria-label="引导步骤">${guideInfo.steps.map((step,i)=>`<button type="button" data-guide-step="${i}" ${i===guideStep?'aria-current="step"':''}><span>${String(i+1).padStart(2,'0')}</span>${esc(step.title)}</button>`).join('')}</div><article id="guide-step-content" class="guide-step-content" aria-live="polite">${guideStepBody()}</article></div><div class="guide-actions"><div><button class="secondary" id="guide-prev">← 上一步</button><button class="secondary" id="guide-next">下一步 →</button></div><button class="primary" id="guide-ack">${guideInfo.needs_attention?'已了解，进入工作台':'返回工作台'} →</button></div></div>`,'ROLE-BASED GUIDE')+
+    panel('本次更新与功能边界',`<div class="panel-body"><div class="release-version">v${esc(guideInfo.version)} <span>当前工作空间版本</span></div>${guideInfo.changes.map((text,i)=>`<div class="step"><span>0${i+1}</span><div>${esc(text)}</div></div>`).join('')}<p class="field-help spacer">${esc(guideInfo.boundary)}</p><p class="field-help">当前文本来源：${guideInfo.text_source==='simulation'?'本地模拟':'已配置上游，健康状态须核验'}；运行控制：模拟</p></div>`,'WHAT IS NEW');
+}
+function bindGuide(){
+  if(page!=='guide')return;
+  const update=()=>{
+    $('#guide-step-content').innerHTML=guideStepBody();
+    document.querySelectorAll('[data-guide-step]').forEach(button=>{if(Number(button.dataset.guideStep)===guideStep)button.setAttribute('aria-current','step');else button.removeAttribute('aria-current')});
+    $('#guide-prev').disabled=guideStep===0;$('#guide-next').disabled=guideStep===guideInfo.steps.length-1;
+    $('#guide-target').addEventListener('click',()=>navigate(guideInfo.steps[guideStep].target));
+  };
+  document.querySelectorAll('[data-guide-step]').forEach(button=>button.addEventListener('click',()=>{guideStep=Number(button.dataset.guideStep);update()}));
+  $('#guide-prev').addEventListener('click',()=>{guideStep=Math.max(0,guideStep-1);update()});
+  $('#guide-next').addEventListener('click',()=>{guideStep=Math.min(guideInfo.steps.length-1,guideStep+1);update()});
+  $('#guide-ack').addEventListener('click',event=>action(event.currentTarget,async()=>{
+    if(guideInfo.needs_attention)await api('/api/guide/ack','POST',{version:guideInfo.version});
+    await navigate(me.user.role==='caller'?'play':'overview');
+  }));
+  update();
+}
+
+$('#open-guide').addEventListener('click',()=>navigate('guide'));
 $('#logout').addEventListener('click',login);login();

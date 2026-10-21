@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#fbf6e8"><title>项目组模型平台</title><link rel="preload" href="/fonts/ChillReunion-Round.woff2" as="font" type="font/woff2" crossorigin><link rel="stylesheet" href="/style.css"></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#fbf6e8"><title>项目组模型平台</title><link rel="preload" href="/fonts/ChillReunion-Round.woff2" as="font" type="font/woff2" crossorigin><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/workspace.css"></head>
 <body class="signed-out">
   <a class="skip-link" href="#main">跳到主要内容</a>
   <aside class="sidebar" id="sidebar" aria-label="工作空间">
@@ -10,9 +10,9 @@
     <div class="sidebar-bottom"><div class="environment"><span class="dot"></span>本地开发环境</div><p id="environment-detail">文本与运行控制均为模拟<br>真实模型启停已关闭</p><button id="logout" class="subtle">退出当前身份 <span aria-hidden="true">↗</span></button></div>
   </aside>
   <div class="shell">
-    <header class="app-header"><div class="header-start"><button id="menu-toggle" class="icon-button" aria-label="展开导航" aria-controls="sidebar" aria-expanded="false">☰</button><span class="breadcrumb">工作空间 <span aria-hidden="true">/</span> <span id="current-page">欢迎</span></span></div><div class="header-end"><span class="badge local">本地 MVP</span><span id="identity">未登录</span></div></header>
+    <header class="app-header"><div class="header-start"><button id="menu-toggle" class="icon-button" aria-label="展开导航" aria-controls="sidebar" aria-expanded="false">☰</button><span class="breadcrumb">工作空间 <span aria-hidden="true">/</span> <span id="current-page">欢迎</span></span></div><div class="header-end"><button id="open-guide" class="secondary">使用引导</button><span class="badge local">本地 MVP</span><span id="identity">未登录</span></div></header>
     <main id="main" tabindex="-1" aria-label="主要内容"></main>
-    <footer><span>项目组模型平台 <span class="footer-dot">·</span> 一处连接，共享模型</span><span>LOCAL EDITION / 0.2</span></footer>
+    <footer><span>项目组模型平台 <span class="footer-dot">·</span> 一处连接，共享模型</span><span id="release-label">LOCAL EDITION</span></footer>
   </div>
   <div id="toast" role="status" aria-live="polite"></div>
   <script type="module" src="/app.js"></script>

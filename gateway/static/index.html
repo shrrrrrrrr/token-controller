@@ -1,17 +1,18 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>项目组模型平台</title><link rel="stylesheet" href="/style.css"></head>
-<body>
-  <aside class="sidebar">
-    <a class="brand" href="/" aria-label="项目组模型平台首页"><span class="brand-mark">M<span>↗</span></span><div>项目组模型平台<small>GROUP / MODEL OPS</small></div></a>
-    <div class="workspace-label">LOCAL WORKSPACE <span>01</span></div>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#fbf6e8"><title>项目组模型平台</title><link rel="preload" href="/fonts/ChillReunion-Round.woff2" as="font" type="font/woff2" crossorigin><link rel="stylesheet" href="/style.css"></head>
+<body class="signed-out">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <aside class="sidebar" id="sidebar" aria-label="工作空间">
+    <a class="brand" href="/" aria-label="项目组模型平台首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>模型工作台<small>GROUP MODEL SPACE</small></span></a>
+    <div class="workspace-label">项目组空间 <span>LOCAL</span></div>
     <nav id="nav" aria-label="主导航"></nav>
-    <div class="sidebar-bottom"><span class="dot"></span> 本地开发环境<small>运行控制代理 · SIMULATION<br>真实 GPU 操作已关闭</small><button id="logout" class="subtle">退出当前身份 ↗</button></div>
+    <div class="sidebar-bottom"><div class="environment"><span class="dot"></span>本地开发环境</div><p id="environment-detail">文本与运行控制均为模拟<br>真实模型启停已关闭</p><button id="logout" class="subtle">退出当前身份 <span aria-hidden="true">↗</span></button></div>
   </aside>
   <div class="shell">
-    <header><span>项目组共享基础设施 <span class="slash">/</span> 模型网关</span><div><span class="badge local">LOCAL MVP</span><span id="identity">未登录</span></div></header>
-    <main id="main" tabindex="-1"></main>
-    <footer><span>项目组共享模型 · API、任务与工具</span><span>v0.1 / 2026.10</span></footer>
+    <header class="app-header"><div class="header-start"><button id="menu-toggle" class="icon-button" aria-label="展开导航" aria-controls="sidebar" aria-expanded="false">☰</button><span class="breadcrumb">工作空间 <span aria-hidden="true">/</span> <span id="current-page">欢迎</span></span></div><div class="header-end"><span class="badge local">本地 MVP</span><span id="identity">未登录</span></div></header>
+    <main id="main" tabindex="-1" aria-label="主要内容"></main>
+    <footer><span>项目组模型平台 <span class="footer-dot">·</span> 一处连接，共享模型</span><span>LOCAL EDITION / 0.2</span></footer>
   </div>
   <div id="toast" role="status" aria-live="polite"></div>
   <script type="module" src="/app.js"></script>

@@ -242,6 +242,10 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     def css():
         return FileResponse(STATIC / "style.css", media_type="text/css")
 
+    @app.get("/fonts/ChillReunion-Round.woff2")
+    def ui_font():
+        return FileResponse(STATIC / "fonts" / "ChillReunion-Round.woff2", media_type="font/woff2")
+
     @app.get("/health")
     def health():
         return {"status": "ok", "mode": "local-mvp", "text_source": provider.source, "runtime_source": "simulation"}

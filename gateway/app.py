@@ -18,6 +18,7 @@ from .providers import DemoText, LiteLLMText, verified_usage
 from .project_tools import configured_tools
 from .guide import account_guide, guide_target
 from .release import UI_VERSION
+from .scheduling import mount_scheduling
 from .store import Fault, Store, canonical, uid
 
 STATIC = Path(__file__).parent / "static"
@@ -228,6 +229,8 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
                 raise Fault("role_forbidden", 403)
             return who
         return check
+
+    mount_scheduling(app,store,identity)
 
     def owned_task(job_id, who):
         # Admin/auditor do not inherit artifact access.

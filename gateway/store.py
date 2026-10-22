@@ -68,6 +68,19 @@ CREATE TABLE IF NOT EXISTS operations (
 CREATE TABLE IF NOT EXISTS scheduler (id INTEGER PRIMARY KEY CHECK(id=1), last_user TEXT);
 INSERT OR IGNORE INTO scheduler VALUES(1, NULL);
 CREATE TABLE IF NOT EXISTS dispatches (user_id TEXT PRIMARY KEY, last_started REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS model_requests (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ client_request_id TEXT NOT NULL, body_hash TEXT NOT NULL, model TEXT NOT NULL,
+ purpose TEXT NOT NULL, preferred_start REAL, estimated_minutes INTEGER NOT NULL,
+ status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 100,
+ scheduled_start REAL, reason TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 1,
+ created REAL NOT NULL, updated REAL NOT NULL, UNIQUE(user_id,client_request_id));
+CREATE INDEX IF NOT EXISTS model_requests_status ON model_requests(status,priority,scheduled_start);
+CREATE INDEX IF NOT EXISTS model_requests_owner ON model_requests(user_id,created);
+CREATE TABLE IF NOT EXISTS notifications (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL,
+ body TEXT NOT NULL, reference TEXT NOT NULL, created REAL NOT NULL, read_at REAL);
+CREATE INDEX IF NOT EXISTS notifications_owner ON notifications(user_id,created);
 """
 
 

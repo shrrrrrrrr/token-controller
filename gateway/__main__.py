@@ -9,7 +9,8 @@ import subprocess
 import sys
 import time
 
-from .catalog import evidence
+from .catalog import evidence, load_model_catalog, ModelCatalogError
+from .deployment import validate_public_origin
 from .store import Store
 
 BASE = Path(__file__).resolve().parents[1]
@@ -21,9 +22,37 @@ def main():
     parser.add_argument("--state", type=Path, default=BASE / ".state")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--qwen", action="store_true", help="显式启用QWEN_API_BASE；不会启停服务器")
+    parser.add_argument("--cloud-preview", action="store_true", help="受限云预发布：禁用所有推理和模拟控制")
+    parser.add_argument("--public-origin", help="预发布站点的唯一 HTTPS origin")
     args = parser.parse_args()
     args.state = args.state.resolve()
-    store = Store(args.state / "gateway.sqlite")
+    marker = args.state / "cloud-preview.json"
+    if marker.exists() and not args.cloud_preview:
+        raise SystemExit("此目录属于云预发布，必须显式使用 --cloud-preview；禁止回退到模拟执行。")
+    if args.cloud_preview:
+        if args.qwen or args.command in ("control", "shutdown"):
+            raise SystemExit("云预发布禁止连接上游、控制代理或通过网页关闭进程。")
+        try:
+            args.public_origin, _ = validate_public_origin(args.public_origin)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        if not marker.exists() and (args.state / "gateway.sqlite").exists():
+            raise SystemExit("请为云预发布指定全新状态目录，不得直接复用本地演示数据库。")
+        args.state.mkdir(parents=True, exist_ok=True)
+        if not marker.exists():
+            with marker.open("x", encoding="utf-8") as handle:
+                json.dump({"mode": "cloud-preview"}, handle)
+        catalog_path = args.state / "model-catalog.local.json"
+        if not catalog_path.exists():
+            with catalog_path.open("x", encoding="utf-8") as handle:
+                json.dump({"models": []}, handle)
+        try:
+            load_model_catalog(catalog_path, cloud_preview=True)
+        except ModelCatalogError:
+            raise SystemExit("模型登记文件无效；未启动服务。") from None
+    elif args.public_origin:
+        raise SystemExit("--public-origin 只能与 --cloud-preview 一起使用。")
+    store = Store(args.state / "gateway.sqlite", seed_demo=not args.cloud_preview)
     if args.command == "shutdown":
         import httpx
         admin = store.one("SELECT * FROM users WHERE role='admin' AND active=1 LIMIT 1")
@@ -54,10 +83,13 @@ def main():
             print("管理员已存在；如Key遗失，在本机终端运行 recover-admin 创建新的Key。")
             return
         if not admin:
-            admin_id = store.create_user("local-admin", "admin", ["qwen3-32b", "h3"], ["h3-single-v1", "h3-sp2-v1"], 1000000)
+            admin_id = store.create_user("preview-admin" if args.cloud_preview else "local-admin", "admin",
+                                         [] if args.cloud_preview else ["qwen3-32b", "h3"],
+                                         [] if args.cloud_preview else ["h3-single-v1", "h3-sp2-v1"], 1000000)
         else:
             admin_id = admin["id"]
-        issued = store.issue_key(admin_id, ["qwen3-32b", "h3"], 1000000, actor="local-cli")
+        grants = json.loads(store.one("SELECT models FROM users WHERE id=?", (admin_id,))["models"])
+        issued = store.issue_key(admin_id, grants, 1000000, actor="local-cli")
         print("管理员Key仅显示一次；页面登录时粘贴，不要提交到仓库：")
         print(issued["key"])
         return
@@ -88,6 +120,19 @@ def main():
         raise SystemExit("此状态目录的网关已运行；不要启动第二个worker。") from None
     from .app import create_app
     from .providers import DemoText, LiteLLMText
+    if args.cloud_preview:
+        try:
+            app = create_app(store, cloud_preview=True, public_origin=args.public_origin,
+                             model_catalog_path=catalog_path,
+                             project_tools_path=args.state / "project-tools.local.json")
+            print(f"Cloud preview: loopback:{args.port} | model execution disabled", flush=True)
+            # Only the local reverse proxy is trusted. The port never binds publicly.
+            uvicorn.run(app, host="127.0.0.1", port=args.port, workers=1, access_log=False,
+                        proxy_headers=True, forwarded_allow_ips="127.0.0.1", limit_concurrency=64,
+                        timeout_keep_alive=5)
+        finally:
+            lockfile.close()
+        return
     if args.qwen:
         base = os.environ.get("QWEN_API_BASE")
         if not base:

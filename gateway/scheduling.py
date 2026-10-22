@@ -16,7 +16,7 @@ TRANSITIONS = {'pending': {'pending','approved','rejected','cancelled'},
 
 class ReservationInput(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
-    model: Literal['qwen3-32b','h3']
+    model: str = Field(min_length=1,max_length=100,pattern=r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$')
     purpose: str = Field(min_length=4,max_length=300)
     preferred_start: float | None = Field(default=None,allow_inf_nan=False)
     estimated_minutes: int = Field(default=30,ge=5,le=240)
@@ -57,7 +57,7 @@ def public_request(row,viewer):
     return result
 
 
-def mount_scheduling(app,store,identity):
+def mount_scheduling(app,store,identity,registered_models=None):
     @app.get('/api/model-requests')
     def requests(who=Depends(identity)):
         rows=store.rows("SELECT * FROM model_requests WHERE status IN ('pending','approved') ORDER BY CASE status WHEN 'approved' THEN 0 ELSE 1 END,priority,COALESCE(scheduled_start,preferred_start,created),created LIMIT 100")
@@ -65,12 +65,17 @@ def mount_scheduling(app,store,identity):
         mine=store.rows('SELECT * FROM model_requests WHERE user_id=? ORDER BY created DESC LIMIT 30',(who['user']['id'],))
         manage=store.rows('SELECT * FROM model_requests ORDER BY created DESC LIMIT 100') if who['user']['role']=='admin' else []
         allowed=sorted(set(json.loads(who['user']['models'])) & set(json.loads(who['key']['models']))) if who['user']['role']!='auditor' else []
+        if registered_models:
+            known={m['id'] for m in registered_models()}
+            allowed=[model for model in allowed if model in known]
         return dict(queue=queue,mine=mine,manage=manage,allowed_models=allowed,
                     can_manage=who['user']['role']=='admin',can_request=bool(allowed),
                     automatic_execution=False,updated_at=time.time(),timezone='Asia/Shanghai')
 
     @app.post('/api/model-requests',status_code=202)
     def submit(body: ReservationInput,who=Depends(identity)):
+        if registered_models and body.model not in {m['id'] for m in registered_models()}:
+            raise Fault('model_not_registered',400)
         body_hash=hashlib.sha256(canonical(body.model_dump()).encode()).hexdigest()
         now=time.time()
         with store.tx() as db:

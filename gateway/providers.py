@@ -6,6 +6,13 @@ import time
 from .store import Fault
 
 
+class UnavailableText:
+    source = "unavailable"
+
+    async def complete(self, body):
+        raise Fault("cloud_preview_execution_disabled", 503)
+
+
 class DemoText:
     source = "simulation"
 

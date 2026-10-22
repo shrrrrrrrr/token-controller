@@ -1,0 +1,19 @@
+{
+  "models": [
+    {
+      "id": "example-text-large",
+      "display_name": "示例大型文本模型",
+      "kind": "text",
+      "deployment_status": "planned",
+      "description": "合成登记示例；尚未部署，不能调用。",
+      "upstream_model": "example-provider-model"
+    },
+    {
+      "id": "example-video",
+      "display_name": "示例视频模型",
+      "kind": "video",
+      "deployment_status": "offline",
+      "description": "合成离线模型；登记不代表已有运行授权。"
+    }
+  ]
+}

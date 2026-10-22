@@ -85,7 +85,7 @@ CREATE INDEX IF NOT EXISTS notifications_owner ON notifications(user_id,created)
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, seed_demo=True):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
@@ -93,11 +93,12 @@ class Store:
             if "source" not in [r[1] for r in db.execute("PRAGMA table_info(requests)")]:
                 db.execute("ALTER TABLE requests ADD COLUMN source TEXT NOT NULL DEFAULT 'simulation'")
             db.execute("PRAGMA journal_mode=WAL")
-            for profile in ("qwen-tp2-v1", "h3-single-v1", "h3-sp2-v1"):
-                db.execute("INSERT OR IGNORE INTO runtimes VALUES(?,?,?)",
-                           (profile, "ready" if profile.startswith("qwen") else "stopped", time.time()))
-            db.execute("INSERT OR IGNORE INTO routes VALUES('qwen3-32b','qwen-tp2-v1',0,'always_on','ready')")
-            db.execute("INSERT OR IGNORE INTO routes VALUES('h3','h3-sp2-v1',0,'manual','stopped')")
+            if seed_demo:
+                for profile in ("qwen-tp2-v1", "h3-single-v1", "h3-sp2-v1"):
+                    db.execute("INSERT OR IGNORE INTO runtimes VALUES(?,?,?)",
+                               (profile, "ready" if profile.startswith("qwen") else "stopped", time.time()))
+                db.execute("INSERT OR IGNORE INTO routes VALUES('qwen3-32b','qwen-tp2-v1',0,'always_on','ready')")
+                db.execute("INSERT OR IGNORE INTO routes VALUES('h3','h3-sp2-v1',0,'manual','stopped')")
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
@@ -132,9 +133,20 @@ class Store:
         db.execute("INSERT INTO audit(actor,action,target,detail,created) VALUES(?,?,?,?,?)",
                    (actor, action, target, canonical(detail or {}), time.time()))
 
-    def create_user(self, name, role, models, profiles, budget, actor="bootstrap"):
+    def check_admin(self, db, authorization):
+        if authorization is None:
+            return  # Internal CLI/test callers; never derived from request body.
+        key = db.execute("SELECT * FROM keys WHERE id=?", (authorization["key"]["id"],)).fetchone()
+        user = db.execute("SELECT * FROM users WHERE id=?", (authorization["user"]["id"],)).fetchone()
+        if not key or key["revoked"] or key["expires"] <= time.time() or not user or not user["active"]:
+            raise Fault("invalid_or_expired_key", 401)
+        if user["role"] != "admin" or key["user_id"] != user["id"]:
+            raise Fault("role_forbidden", 403)
+
+    def create_user(self, name, role, models, profiles, budget, actor="bootstrap", authorization=None):
         user_id = uid("usr_")
         with self.tx() as db:
+            self.check_admin(db, authorization)
             try:
                 db.execute("INSERT INTO users(id,name,role,models,profiles,budget) VALUES(?,?,?,?,?,?)",
                            (user_id, name, role, canonical(models), canonical(profiles), budget))
@@ -143,9 +155,10 @@ class Store:
             self.audit(db, actor, "user.create", user_id, dict(name=name, role=role, models=models, profiles=profiles, budget=budget))
         return user_id
 
-    def issue_key(self, user_id, models, budget, rpm=30, tpm=100000, concurrency=2, days=30, actor="bootstrap"):
+    def issue_key(self, user_id, models, budget, rpm=30, tpm=100000, concurrency=2, days=30, actor="bootstrap", authorization=None):
         token, key_id = "lg_" + secrets.token_urlsafe(32), uid("key_")
         with self.tx() as db:
+            self.check_admin(db, authorization)
             user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             if not user or not user["active"]:
                 raise Fault("user_not_found", 404)

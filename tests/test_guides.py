@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from gateway.app import create_app
 from gateway.guide import ROLE_NAMES
+from gateway.guide import account_guide
 from gateway.release import UI_VERSION
 from gateway.store import Store
 
@@ -68,3 +69,17 @@ def test_guide_releases_invalidate_old_confirmation(guides,monkeypatch):
     assert client.post('/api/guide/ack',headers=headers['caller'],json={'version':UI_VERSION}).status_code==409
     assert client.post('/api/guide/ack',headers=headers['caller'],json={'version':'99.0.0','user_id':users['admin']}).status_code==422
     assert client.post('/api/guide/ack',headers=headers['caller'],json={'version':'99.0.0'}).status_code==200
+
+
+@pytest.mark.parametrize('role',['admin','caller'])
+def test_cloud_guide_explains_disabled_inference_without_claiming_simulation(guides,role):
+    store,users,headers,client=guides
+    who=store.identity(headers[role]['Authorization'][7:])
+    guide=account_guide(store,who,'unavailable',cloud_preview=True)
+    assert guide['runtime_source']=='disabled'
+    assert guide['text_source']=='unavailable'
+    assert '推理与运行控制均关闭' in guide['boundary']
+    assert 'scope 分离' in guide['boundary']
+    assert all(step['target'] in guide['allowed_pages'] for step in guide['steps'])
+    assert any('待部署' in step['text'] for step in guide['steps'])
+    assert not any('当前默认是模拟文本' in step['text'] for step in guide['steps'])

@@ -52,13 +52,20 @@ CLOUD_COMMON = [
 ]
 
 
-def account_guide(store, who, text_source, cloud_preview=False):
+def account_guide(store, who, text_source, cloud_preview=False, cloud_api=False):
     user, key = who['user'], who['key']
     role = user['role']
     acknowledged = store.one("SELECT id FROM audit WHERE actor=? AND action='guide.ack' AND target=? LIMIT 1",
                              (user['id'], guide_target(role))) is not None
     models = sorted(set(json.loads(user['models'])) & set(json.loads(key['models']))) if role != 'auditor' else []
-    if cloud_preview:
+    if cloud_api:
+        steps = ([dict(title='发放普通成员调用 Key', text='现有账户和额度继续保留。管理员 Key 只管理平台；为普通成员分配已登记模型、预算及独立 Key。用户与 Key 权限取交集，普通成员 Key 才能调用公网文本 API。', target='users'),
+                  dict(title='核对上游与待对账项', text='运营者通过固定 HTTPS 接口登记上游凭证，服务器私有文件保存，不在网页或日志回显。未知提交不自动重试或退款，需要证据对账；未知任务会阻止后续派发。', target='usage')]
+                 if role == 'admin' else [dict(title='使用获授的文本模型', text='使用普通成员 Key 调用 OpenAI 非流式 Chat Completions。模型目录只在只读 API 检查通过后显示可用；网关全局同时派发一个文本请求，满载返回429，预约队列不代替推理队列。', target='play')])
+        steps += [dict(title='查看用量与保留请求 ID', text='额度先预留、按真实 usage 结算。对同一请求保留 Idempotency-Key；未知提交不得换 ID 盲目重发。上游调用没有自动重试。', target='usage'),
+                  dict(title='接入边界', text='当前只有非流式文本 API；SSE、工具调用、Responses 和 Anthropic Messages 尚未实现，不代表完整兼容任何 harness。管理网页登录仍使用内存中的 Key，尚未实现独立网页登录会话。', target='connect'),
+                  dict(title='预约与工具入口', text='预约只登记时间窗，不自动切换模型。项目工具沿用原站登录，校内工具链接不代表已完成公网代理。模型启停、视频生成和服务端 harness 仍未开放。', target='queue')]
+    elif cloud_preview:
         steps = ([dict(title='验收成员与权限管理', text='仅启用管理员和普通成员。先从登记目录分配成员模型范围与预算，再发放成员 Key；账户与 Key 权限取交集。本期网页登录仍使用内存中的高熵 Key，正式会话与调用凭证分离尚待完成。', target='users'),
                   dict(title='确认运行控制边界', text='云端受限预发布不连接控制代理，不开放真实或模拟启停。未来管理员可操作全部已批准 Profile，但 GPU 冲突、在途任务和常驻保护仍会在后端检查。', target='runtime')]
                  if role == 'admin' else [dict(title='进入受限预发布工作空间', text='可以查看获授目录、个人记录、预约和通知。模型尚未接入，当前没有真实或模拟推理，也不会产生新的推理扣费。刷新页面需重新输入访问 Key。', target='play')])
@@ -67,6 +74,6 @@ def account_guide(store, who, text_source, cloud_preview=False):
         steps = ROLE_STEPS[role] + COMMON
     return dict(version=UI_VERSION, role=role, role_name=ROLE_NAMES[role], needs_attention=not acknowledged,
                 allowed_pages=ROLE_PAGES[role], models=models, text_source=text_source,
-                runtime_source='disabled' if cloud_preview else 'simulation', steps=steps, changes=RELEASE_NOTES,
-                boundary=('云端受限预发布：推理与运行控制均关闭。仅验收成员、权限、目录、预约和通知；正式会话与调用 Key scope 分离、模型通道和客户端兼容仍待完成。'
+                runtime_source='disabled' if cloud_preview or cloud_api else 'simulation', steps=steps, changes=RELEASE_NOTES,
+                boundary=('云端受限文本试运行：普通成员获授 Key 可调用非流式文本。管理员凭证不得调用模型；运行控制、视频、SSE、工具协议和独立网页登录会话尚未开放。' if cloud_api else '云端受限预发布：推理与运行控制均关闭。仅验收成员、权限、目录、预约和通知；正式会话与调用 Key scope 分离、模型通道和客户端兼容仍待完成。'
                           if cloud_preview else '预约登记、审批和个人通知已实现；自动执行、夜间模型切换、服务端 harness 和真实 GPU 控制尚未上线。'))

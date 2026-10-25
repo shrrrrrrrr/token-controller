@@ -178,7 +178,8 @@ class Store:
             raise Fault("user_disabled", 401)
         return dict(user=user, key=key)
 
-    def reserve(self, identity, idem, body, kind, model, points, profile, profile_hash, max_queue=30, source="simulation"):
+    def reserve(self, identity, idem, body, kind, model, points, profile, profile_hash, max_queue=30, source="simulation",
+                runtime_required=True, global_concurrency=None, required_role=None):
         user_id, key_id = identity["user"]["id"], identity["key"]["id"]
         body_hash = digest(canonical(dict(body=body, source=source)))
         now = time.time()
@@ -188,6 +189,8 @@ class Store:
             user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             if key["revoked"] or key["expires"] <= now or not user["active"]:
                 raise Fault("invalid_or_expired_key", 401)
+            if required_role is not None and user["role"] != required_role:
+                raise Fault("member_calling_key_required", 403)
             if user["role"] == "auditor" or model not in json.loads(key["models"]) or model not in json.loads(user["models"]):
                 raise Fault("model_forbidden", 403)
             old = db.execute("SELECT * FROM requests WHERE key_id=? AND idem=?", (key_id, idem)).fetchone()
@@ -197,8 +200,12 @@ class Store:
                 return dict(old), False
             route = db.execute("SELECT * FROM routes WHERE model=?", (model,)).fetchone()
             runtime = db.execute("SELECT * FROM runtimes WHERE profile=?", (profile,)).fetchone()
-            if not route or route["draining"] or route["profile"] != profile or not runtime or runtime["status"] != "ready":
+            if runtime_required and (not route or route["draining"] or route["profile"] != profile or not runtime or runtime["status"] != "ready"):
                 raise Fault("model_not_ready_or_draining", 503)
+            if global_concurrency is not None and db.execute(
+                    "SELECT COUNT(*) FROM requests WHERE kind='chat' AND status IN ('reserved','dispatched','reconciliation')"
+                    ).fetchone()[0] >= global_concurrency:
+                raise Fault("gateway_capacity_or_reconciliation_limit", 429)
             recent = db.execute("SELECT COUNT(*),COALESCE(SUM(reserved),0) FROM requests WHERE key_id=? AND created>?",
                                 (key_id, now-60)).fetchone()
             active = db.execute("SELECT COUNT(*) FROM requests WHERE key_id=? AND status IN ('reserved','dispatched','reconciliation')", (key_id,)).fetchone()[0]

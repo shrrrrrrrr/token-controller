@@ -16,6 +16,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .catalog import PROFILES, evidence, inventory, load_model_catalog, authorized_catalog, ModelCatalogError
 from .deployment import preview_blocked, validate_public_origin
 from .providers import DemoText, LiteLLMText, UnavailableText, verified_usage
+from .upstream import CloudText
+from .cloud_api import mount_cloud_api
 from .project_tools import configured_tools
 from .guide import account_guide, guide_target
 from .release import UI_VERSION
@@ -159,20 +161,26 @@ class Service:
 
 
 def create_app(store=None, provider=None, control_url=None, control_token=None, control_transport=None, background=True, project_tools_path=None,
-               cloud_preview=False, public_origin=None, model_catalog_path=None):
+               cloud_preview=False, public_origin=None, model_catalog_path=None, cloud_api=False):
     origin_host = None
+    public_mode = cloud_preview or cloud_api
+    if cloud_api:
+        if cloud_preview or not isinstance(provider, CloudText) or control_url or control_token or control_transport:
+            raise ValueError("cloud API requires the fixed loopback provider and no runtime controller")
+        public_origin, origin_host = validate_public_origin(public_origin)
+        background = False
     if cloud_preview:
         public_origin, origin_host = validate_public_origin(public_origin)
         if control_url or control_token or control_transport or (provider is not None and not isinstance(provider, UnavailableText)):
             raise ValueError("cloud preview cannot attach a provider or control agent")
         background = False
-    store = store or Store(Path(__file__).parents[1] / ".state" / "gateway.sqlite", seed_demo=not cloud_preview)
+    store = store or Store(Path(__file__).parents[1] / ".state" / "gateway.sqlite", seed_demo=not public_mode)
     provider = provider or (UnavailableText() if cloud_preview else DemoText())
     service = Service(store, provider, control_url, control_token, control_transport)
 
     def registered_models():
         try:
-            return load_model_catalog(model_catalog_path, cloud_preview=cloud_preview)
+            return load_model_catalog(model_catalog_path, cloud_preview=public_mode)
         except ModelCatalogError:
             raise Fault("model_catalog_unavailable", 503) from None
 
@@ -189,6 +197,11 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     @asynccontextmanager
     async def lifespan(app):
         store.recover()
+        if cloud_api:
+            try:
+                await provider.probe()
+            except Fault:
+                pass  # UI remains available for credential provisioning and repair.
 
         async def worker():
             while True:
@@ -208,18 +221,25 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     app = FastAPI(title="项目组模型平台", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.service, app.state.store = service, store
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[origin_host, "127.0.0.1"] if cloud_preview else ["localhost", "127.0.0.1", "[::1]", "testserver"])
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[origin_host, "127.0.0.1"] if public_mode else ["localhost", "127.0.0.1", "[::1]", "testserver"])
 
     @app.middleware("http")
     async def security(request: Request, call_next):
         origin = request.headers.get("origin")
-        expected_origin = public_origin if cloud_preview else str(request.base_url).rstrip("/")
+        expected_origin = public_origin if public_mode else str(request.base_url).rstrip("/")
         if origin and origin != expected_origin:
             return JSONResponse({"error": {"code": "origin_forbidden"}}, status_code=403)
-        if cloud_preview and request.url.path != "/health" and request.url.scheme != "https":
+        if public_mode and request.url.path != "/health" and request.url.scheme != "https":
             return JSONResponse({"error": {"code": "https_required"}}, status_code=403)
         if cloud_preview and preview_blocked(request.url.path, request.method):
             return JSONResponse({"error": {"code": "cloud_preview_execution_disabled"}}, status_code=503)
+        if cloud_api:
+            path = request.url.path.rstrip("/")
+            if path == "/api/local/shutdown" or (path.startswith("/api/runtime") and request.method not in ("GET", "HEAD", "OPTIONS")):
+                return JSONResponse({"error": {"code": "cloud_runtime_control_disabled"}}, status_code=503)
+            if (path == "/v1" or path.startswith("/v1/")) and (path, request.method) not in {
+                    ("/v1/models", "GET"), ("/v1/chat/completions", "POST")}:
+                return JSONResponse({"error": {"code": "protocol_not_supported_in_cloud_pilot"}}, status_code=501)
         length = request.headers.get("content-length")
         if length and (not length.isdigit() or int(length) > 262144):
             return JSONResponse({"error": {"code": "body_too_large"}}, status_code=413)
@@ -253,7 +273,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         if len(authorization) > 256:
             raise Fault("invalid_or_expired_key", 401)
         who = store.identity(authorization[7:])
-        if cloud_preview and who["user"]["role"] not in ("admin", "caller"):
+        if public_mode and who["user"]["role"] not in ("admin", "caller"):
             raise Fault("role_not_enabled", 403)
         return who
 
@@ -265,6 +285,8 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         return check
 
     mount_scheduling(app,store,identity,registered_models)
+    if cloud_api:
+        mount_cloud_api(app, store, provider, identity, registered_models, Chat)
 
     def owned_task(job_id, who):
         # Admin/auditor do not inherit artifact access.
@@ -295,21 +317,28 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "mode": "cloud-preview" if cloud_preview else "local-mvp", "text_source": provider.source, "runtime_source": "disabled" if cloud_preview else "simulation"}
+        return {"status": "ok", "mode": "cloud-api" if cloud_api else "cloud-preview" if cloud_preview else "local-mvp", "text_source": provider.source, "runtime_source": "disabled" if public_mode else "simulation"}
 
     @app.get("/api/me")
     def me(who=Depends(identity)):
         user, key = dict(who["user"]), dict(who["key"])
         key.pop("hash")
         return {"user": user, "key": key, "text_source": provider.source,
-                "mode": "cloud-preview" if cloud_preview else "local-mvp", "enabled_roles": ["admin", "caller"],
-                "capabilities": {"inference": not cloud_preview, "runtime_control": False}}
+                "mode": "cloud-api" if cloud_api else "cloud-preview" if cloud_preview else "local-mvp", "enabled_roles": ["admin", "caller"],
+                "capabilities": {"inference": not cloud_preview and (not cloud_api or user["role"] == "caller"), "runtime_control": False}}
 
     @app.get("/api/model-catalog")
     def model_catalog(who=Depends(identity)):
-        return {"models": authorized_catalog(who, registered_models()),
+        models = authorized_catalog(who, registered_models())
+        if cloud_api:
+            for item in models:
+                if item["id"] == provider.alias:
+                    item.update(status="ready" if provider.ready else "offline", health="verified" if provider.ready else "unverified",
+                                callable=provider.ready and item["authorized"] and who["user"]["role"] == "caller",
+                                source="live_api_probe" if provider.ready else "private_configuration_not_live")
+        return {"models": models,
                 "source": "private_configuration" if model_catalog_path or cloud_preview else "synthetic_example_only",
-                "runtime_source": "disabled" if cloud_preview else "simulation"}
+                "runtime_source": "disabled" if public_mode else "simulation"}
 
     @app.get('/api/project-tools')
     def project_tools(who=Depends(identity)):
@@ -317,7 +346,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.get('/api/guide')
     def guide(who=Depends(identity)):
-        return account_guide(store, who, provider.source, cloud_preview=cloud_preview)
+        return account_guide(store, who, provider.source, cloud_preview=cloud_preview, cloud_api=cloud_api)
 
     @app.post('/api/guide/ack')
     def acknowledge_guide(body: GuideAck, who=Depends(identity)):
@@ -351,22 +380,22 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.get("/api/inventory")
     def catalog(who=Depends(roles(*MANAGERS))):
-        if cloud_preview:
+        if public_mode:
             return {"source": "private_configuration_not_live", "stale": True,
                     "assets": [dict(id=m["id"], display_name=m["display_name"], path="未接入", revision="未接入", license="未核验",
                                     deployment_status=m["deployment_status"]) for m in registered_models()],
-                    "instances": [], "gpus": [], "profiles": [], "unknowns": ["校内模型尚未接通；登记名称不代表已部署或可调用。"]}
+                    "instances": [], "gpus": [], "profiles": [], "unknowns": ["只核验模型 API，不采集 GPU 或容器实时状态。" if cloud_api else "校内模型尚未接通；登记名称不代表已部署或可调用。"]}
         return inventory()
 
     @app.get("/api/evidence")
     def evidence_api(who=Depends(roles(*MANAGERS))):
-        if cloud_preview:
+        if public_mode:
             return {"source": "not_collected", "checks": [], "server_live_checked": False, "gpu_live_checked": False}
         return evidence()
 
     @app.get("/api/runtime")
     def runtime(who=Depends(roles(*MANAGERS))):
-        if cloud_preview:
+        if public_mode:
             return {"source": "disabled", "real_control_enabled": False, "instances": [], "routes": [], "profiles": [], "operations": []}
         return {"source": "simulation", "real_control_enabled": False,
                 "instances": store.rows("SELECT * FROM runtimes"), "routes": store.rows("SELECT * FROM routes"),
@@ -391,6 +420,8 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.post("/api/qwen/probe")
     async def probe(who=Depends(roles("admin", "operator"))):
+        if cloud_api:
+            return await provider.probe()
         if not isinstance(provider, LiteLLMText):
             raise Fault("qwen_not_configured_demo_mode", 409)
         try:
@@ -497,14 +528,14 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     @app.post("/api/users", status_code=201)
     def add_user(body: UserInput, who=Depends(roles("admin"))):
         validate_models(body.models)
-        if cloud_preview and body.profiles:
+        if public_mode and body.profiles:
             raise Fault("cloud_preview_execution_disabled", 503)
         return {"id": store.create_user(**body.model_dump(), actor=who["user"]["id"], authorization=who)}
 
     @app.patch("/api/users/{user_id}")
     def update_user(user_id: str, body: UserPatch, who=Depends(roles("admin"))):
         validate_models(body.models)
-        if cloud_preview and body.profiles:
+        if public_mode and body.profiles:
             raise Fault("cloud_preview_execution_disabled", 503)
         with store.tx() as db:
             current_admin(db, who)

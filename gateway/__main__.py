@@ -23,13 +23,20 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--qwen", action="store_true", help="显式启用QWEN_API_BASE；不会启停服务器")
     parser.add_argument("--cloud-preview", action="store_true", help="受限云预发布：禁用所有推理和模拟控制")
+    parser.add_argument("--cloud-api", action="store_true", help="受限云端文本试运行；禁用运行控制和视频")
+    parser.add_argument("--upstream-config", type=Path, help="运营者维护的固定 loopback 模型配置，不含 Key")
     parser.add_argument("--public-origin", help="预发布站点的唯一 HTTPS origin")
     args = parser.parse_args()
     args.state = args.state.resolve()
     marker = args.state / "cloud-preview.json"
-    if marker.exists() and not args.cloud_preview:
+    public_mode = args.cloud_preview or args.cloud_api
+    if args.cloud_api and (args.cloud_preview or args.qwen or args.command != "serve" or not args.upstream_config or not marker.is_file()):
+        raise SystemExit("--cloud-api 只用于现有云预发布状态的 serve，需固定上游配置，禁止混用本地模式。")
+    if args.upstream_config and not args.cloud_api:
+        raise SystemExit("--upstream-config 只能与 --cloud-api 一起使用。")
+    if marker.exists() and not public_mode:
         raise SystemExit("此目录属于云预发布，必须显式使用 --cloud-preview；禁止回退到模拟执行。")
-    if args.cloud_preview:
+    if public_mode:
         if args.qwen or args.command in ("control", "shutdown"):
             raise SystemExit("云预发布禁止连接上游、控制代理或通过网页关闭进程。")
         try:
@@ -52,7 +59,7 @@ def main():
             raise SystemExit("模型登记文件无效；未启动服务。") from None
     elif args.public_origin:
         raise SystemExit("--public-origin 只能与 --cloud-preview 一起使用。")
-    store = Store(args.state / "gateway.sqlite", seed_demo=not args.cloud_preview)
+    store = Store(args.state / "gateway.sqlite", seed_demo=not public_mode)
     if args.command == "shutdown":
         import httpx
         admin = store.one("SELECT * FROM users WHERE role='admin' AND active=1 LIMIT 1")
@@ -120,12 +127,23 @@ def main():
         raise SystemExit("此状态目录的网关已运行；不要启动第二个worker。") from None
     from .app import create_app
     from .providers import DemoText, LiteLLMText
-    if args.cloud_preview:
+    if public_mode:
         try:
-            app = create_app(store, cloud_preview=True, public_origin=args.public_origin,
+            if args.cloud_api:
+                from .upstream import CloudText, load_upstream_config
+                try:
+                    config = load_upstream_config(args.upstream_config)
+                except ValueError as exc:
+                    raise SystemExit(str(exc)) from None
+                if not any(item["id"] == config["alias"] and item["kind"] == "text" for item in load_model_catalog(catalog_path, cloud_preview=True)):
+                    raise SystemExit("固定上游 alias 必须已登记为文本模型。")
+                provider = CloudText(config, args.state)
+            else:
+                provider = None
+            app = create_app(store, provider=provider, cloud_preview=args.cloud_preview, cloud_api=args.cloud_api, public_origin=args.public_origin,
                              model_catalog_path=catalog_path,
                              project_tools_path=args.state / "project-tools.local.json")
-            print(f"Cloud preview: loopback:{args.port} | model execution disabled", flush=True)
+            print(f"Cloud mode: {'text pilot' if args.cloud_api else 'preview'} | loopback:{args.port} | runtime control disabled", flush=True)
             # Only the local reverse proxy is trusted. The port never binds publicly.
             uvicorn.run(app, host="127.0.0.1", port=args.port, workers=1, access_log=False,
                         proxy_headers=True, forwarded_allow_ips="127.0.0.1", limit_concurrency=64,

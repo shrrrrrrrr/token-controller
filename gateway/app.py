@@ -161,7 +161,7 @@ class Service:
 
 
 def create_app(store=None, provider=None, control_url=None, control_token=None, control_transport=None, background=True, project_tools_path=None,
-               cloud_preview=False, public_origin=None, model_catalog_path=None, cloud_api=False):
+               cloud_preview=False, public_origin=None, model_catalog_path=None, cloud_api=False, web_accounts=False):
     origin_host = None
     public_mode = cloud_preview or cloud_api
     if cloud_api:
@@ -267,7 +267,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         # FastAPI's default validation body echoes submitted values, including credentials.
         return JSONResponse({"error": {"code": "invalid_request", "fields": [".".join(map(str, e["loc"])) for e in exc.errors()]}}, status_code=422)
 
-    def identity(authorization: str = Header(default="")):
+    def bearer_identity(authorization: str = Header(default="")):
         if not authorization.startswith("Bearer "):
             raise Fault("bearer_key_required", 401)
         if len(authorization) > 256:
@@ -276,6 +276,13 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         if public_mode and who["user"]["role"] not in ("admin", "caller"):
             raise Fault("role_not_enabled", 403)
         return who
+
+    identity = bearer_identity
+    if web_accounts:
+        from .accounts import WebAccounts, mount_accounts
+        web = WebAccounts(store, public_origin=public_origin if public_mode else None)
+        identity = mount_accounts(app, store, web, registered_models)
+        app.state.web_accounts = web
 
     def roles(*allowed):
         def check(who=Depends(identity)):
@@ -286,7 +293,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     mount_scheduling(app,store,identity,registered_models)
     if cloud_api:
-        mount_cloud_api(app, store, provider, identity, registered_models, Chat)
+        mount_cloud_api(app, store, provider, identity, registered_models, Chat, api_identity=bearer_identity)
 
     def owned_task(job_id, who):
         # Admin/auditor do not inherit artifact access.
@@ -303,6 +310,10 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     def script():
         return FileResponse(STATIC / "app.js", media_type="application/javascript")
 
+    @app.get('/accounts.js')
+    def account_script():
+        return FileResponse(STATIC / 'accounts.js', media_type='application/javascript')
+
     @app.get("/style.css")
     def css():
         return FileResponse(STATIC / "style.css", media_type="text/css")
@@ -317,15 +328,17 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "mode": "cloud-api" if cloud_api else "cloud-preview" if cloud_preview else "local-mvp", "text_source": provider.source, "runtime_source": "disabled" if public_mode else "simulation"}
+        return {"status": "ok", "mode": "cloud-api" if cloud_api else "cloud-preview" if cloud_preview else "local-mvp", "text_source": provider.source, "runtime_source": "disabled" if public_mode else "simulation", **({"web_accounts": True} if web_accounts else {})}
 
     @app.get("/api/me")
     def me(who=Depends(identity)):
         user, key = dict(who["user"]), dict(who["key"])
         key.pop("hash")
         return {"user": user, "key": key, "text_source": provider.source,
+                "auth_mode": "password_session" if web_accounts else "legacy_key",
+                "account": who.get("account"),
                 "mode": "cloud-api" if cloud_api else "cloud-preview" if cloud_preview else "local-mvp", "enabled_roles": ["admin", "caller"],
-                "capabilities": {"inference": not cloud_preview and (not cloud_api or user["role"] == "caller"), "runtime_control": False}}
+                "capabilities": {"inference": bool(user['active']) and not cloud_preview and (not cloud_api or user["role"] == "caller"), "runtime_control": False}}
 
     @app.get("/api/model-catalog")
     async def model_catalog(who=Depends(identity)):
@@ -353,7 +366,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.get('/api/guide')
     def guide(who=Depends(identity)):
-        return account_guide(store, who, provider.source, cloud_preview=cloud_preview, cloud_api=cloud_api)
+        return account_guide(store, who, provider.source, cloud_preview=cloud_preview, cloud_api=cloud_api, web_accounts=web_accounts)
 
     @app.post('/api/guide/ack')
     def acknowledge_guide(body: GuideAck, who=Depends(identity)):
@@ -379,7 +392,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         return {"stopping": True, "server_models_affected": False}
 
     @app.get("/v1/models")
-    def models(who=Depends(identity)):
+    def models(who=Depends(bearer_identity)):
         allowed = set(json.loads(who["user"]["models"])) & set(json.loads(who["key"]["models"]))
         if who["user"]["role"] == "auditor":
             allowed = set()
@@ -437,7 +450,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
             raise Fault("qwen_probe_failed", 503) from None
 
     @app.post("/v1/chat/completions")
-    async def chat(body: Chat, who=Depends(identity), idempotency_key: str = Header(default="", max_length=120)):
+    async def chat(body: Chat, who=Depends(bearer_identity), idempotency_key: str = Header(default="", max_length=120)):
         allowed = set(json.loads(who["user"]["models"])) & set(json.loads(who["key"]["models"]))
         if body.model not in allowed or who["user"]["role"] == "auditor":
             raise Fault("model_forbidden", 403)
@@ -473,7 +486,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
                                 headers={"X-Request-ID": req["id"]})
 
     @app.post("/v1/videos", status_code=202)
-    def video(body: Video, who=Depends(identity), idempotency_key: str = Header(default="", max_length=120)):
+    def video(body: Video, who=Depends(bearer_identity), idempotency_key: str = Header(default="", max_length=120)):
         route = store.one("SELECT * FROM routes WHERE model='h3'")
         profile = PROFILES[route["profile"]]
         req, fresh = store.reserve(who, idempotency_key or uid("auto_"), body.model_dump(), "video", "h3",
@@ -482,12 +495,12 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         return {**task, "request_id": req["id"], "replay": not fresh, "notice": "模拟队列；真实H3适配未启用"}
 
     @app.get("/v1/videos/{job_id}")
-    def video_status(job_id: str, who=Depends(identity)):
+    def video_status(job_id: str, who=Depends(bearer_identity)):
         task = owned_task(job_id, who)
         return {k: task[k] for k in ("id", "request_id", "status", "source", "created", "started")}
 
     @app.post("/v1/videos/{job_id}/cancel")
-    def video_cancel(job_id: str, who=Depends(identity)):
+    def video_cancel(job_id: str, who=Depends(bearer_identity)):
         task = owned_task(job_id, who)
         with store.tx() as db:
             row = db.execute("SELECT status FROM tasks WHERE id=?", (job_id,)).fetchone()
@@ -498,7 +511,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         return {"id": job_id, "status": "cancelled"}
 
     @app.get("/v1/videos/{job_id}/content")
-    def content(job_id: str, who=Depends(identity)):
+    def content(job_id: str, who=Depends(bearer_identity)):
         task = owned_task(job_id, who)
         if task["status"] != "completed" or not task["artifact"]:
             raise Fault("artifact_not_ready", 409)
@@ -512,6 +525,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     def usage(who=Depends(identity), limit: int = Query(ge=1, le=100, default=50), offset: int = Query(ge=0, default=0)):
         clause, args = ("", []) if who["user"]["role"] in MANAGERS else (" WHERE user_id=?", [who["user"]["id"]])
         return {"requests": store.rows("SELECT id,user_id,key_id,kind,model,source,profile,profile_hash,status,reserved,actual,input_tokens,output_tokens,created,elapsed_ms,error FROM requests"+clause+" ORDER BY created DESC LIMIT ? OFFSET ?", (*args, limit, offset)),
+                "totals": store.one("SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,COALESCE(SUM(output_tokens),0) AS output_tokens FROM requests"+clause, args),
                 "ledger": store.rows("SELECT l.* FROM ledger l JOIN requests r ON l.request_id=r.id"+(" WHERE r.user_id=?" if args else "")+" ORDER BY l.id DESC LIMIT ? OFFSET ?", (*args, limit*3, offset*3))}
 
     @app.post("/api/requests/{request_id}/reconcile")
@@ -530,6 +544,8 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.get("/api/users")
     def users(who=Depends(roles(*MANAGERS))):
+        if web_accounts:
+            return store.rows("SELECT u.*,a.username AS login_username,a.status AS registration_status FROM users u LEFT JOIN login_accounts a ON a.user_id=u.id ORDER BY u.name")
         return store.rows("SELECT * FROM users ORDER BY name")
 
     @app.post("/api/users", status_code=201)
@@ -549,12 +565,18 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
             current = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             if not current:
                 raise Fault("user_not_found", 404)
+            if web_accounts:
+                pending = db.execute("SELECT 1 FROM login_accounts WHERE user_id=? AND status='pending'", (user_id,)).fetchone()
+                if pending:
+                    raise Fault('registration_approval_required', 409)
             if user_id == who["user"]["id"] and (not body.active or body.role != "admin"):
                 raise Fault("cannot_remove_current_admin_access", 409)
             if current["role"] == "admin" and (not body.active or body.role != "admin"):
                 if db.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1").fetchone()[0] <= 1:
                     raise Fault("last_admin_protected", 409)
             db.execute("UPDATE users SET role=?,active=?,models=?,profiles=? WHERE id=?", (body.role, int(body.active), canonical(body.models), canonical(body.profiles), user_id))
+            if web_accounts and (body.role != current['role'] or not body.active):
+                db.execute('DELETE FROM web_sessions WHERE user_id=?', (user_id,))
             store.audit(db, who["user"]["id"], "user.grants.change", user_id, dict(before={k: current[k] for k in ("role", "active", "models", "profiles")}, after=body.model_dump()))
         return {"id": user_id, "updated": True}
 
@@ -577,6 +599,8 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.post("/api/keys", status_code=201)
     def add_key(body: KeyInput, who=Depends(roles("admin"))):
+        if web_accounts:
+            raise Fault('use_personal_key_management', 403)
         validate_models(body.models)
         return store.issue_key(**body.model_dump(), actor=who["user"]["id"], authorization=who)
 

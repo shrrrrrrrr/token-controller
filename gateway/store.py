@@ -25,6 +25,25 @@ def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def current_identity(db, who):
+    """Recheck session/key ownership and current grants inside write transactions."""
+    user = db.execute("SELECT * FROM users WHERE id=?", (who["user"]["id"],)).fetchone()
+    if "session" in who:
+        session = db.execute("SELECT * FROM web_sessions WHERE token_hash=?", (who["session"],)).fetchone()
+        account = db.execute("SELECT status FROM login_accounts WHERE user_id=?", (who["user"]["id"],)).fetchone()
+        now = time.time()
+        if (not session or session["user_id"] != who["user"]["id"] or session["expires"] <= now
+                or session["last_seen"] <= now-1800 or not account or account["status"] != "approved"
+                or not user or not user["active"]):
+            raise Fault("session_expired", 401)
+        return user, dict(id="web-session", user_id=user["id"], models=user["models"], budget=user["budget"])
+    key = db.execute("SELECT * FROM keys WHERE id=?", (who["key"]["id"],)).fetchone()
+    if (not key or key["revoked"] or key["expires"] <= time.time() or not user or not user["active"]
+            or key["user_id"] != user["id"]):
+        raise Fault("invalid_or_expired_key", 401)
+    return user, key
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, role TEXT NOT NULL,
@@ -81,6 +100,22 @@ CREATE TABLE IF NOT EXISTS notifications (
  id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL,
  body TEXT NOT NULL, reference TEXT NOT NULL, created REAL NOT NULL, read_at REAL);
 CREATE INDEX IF NOT EXISTS notifications_owner ON notifications(user_id,created);
+CREATE TABLE IF NOT EXISTS login_accounts (
+ user_id TEXT PRIMARY KEY REFERENCES users(id), username TEXT NOT NULL UNIQUE,
+ password_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','approved')),
+ created REAL NOT NULL, changed REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS web_sessions (
+ token_hash TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), csrf TEXT NOT NULL,
+ created REAL NOT NULL, last_seen REAL NOT NULL, expires REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS web_sessions_owner ON web_sessions(user_id);
+CREATE TABLE IF NOT EXISTS account_tokens (
+ token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ purpose TEXT NOT NULL CHECK(purpose IN ('enroll','reset')), expires REAL NOT NULL,
+ consumed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS key_labels (
+ key_id TEXT PRIMARY KEY REFERENCES keys(id), name TEXT NOT NULL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_rate (
+ bucket TEXT PRIMARY KEY, reset REAL NOT NULL, count INTEGER NOT NULL);
 """
 
 
@@ -136,10 +171,7 @@ class Store:
     def check_admin(self, db, authorization):
         if authorization is None:
             return  # Internal CLI/test callers; never derived from request body.
-        key = db.execute("SELECT * FROM keys WHERE id=?", (authorization["key"]["id"],)).fetchone()
-        user = db.execute("SELECT * FROM users WHERE id=?", (authorization["user"]["id"],)).fetchone()
-        if not key or key["revoked"] or key["expires"] <= time.time() or not user or not user["active"]:
-            raise Fault("invalid_or_expired_key", 401)
+        user, key = current_identity(db, authorization)
         if user["role"] != "admin" or key["user_id"] != user["id"]:
             raise Fault("role_forbidden", 403)
 

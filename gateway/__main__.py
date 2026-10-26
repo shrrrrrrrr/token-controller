@@ -24,9 +24,12 @@ def main():
     parser.add_argument("--qwen", action="store_true", help="显式启用QWEN_API_BASE；不会启停服务器")
     parser.add_argument("--cloud-preview", action="store_true", help="受限云预发布：禁用所有推理和模拟控制")
     parser.add_argument("--cloud-api", action="store_true", help="受限云端文本试运行；禁用运行控制和视频")
+    parser.add_argument("--web-accounts", action="store_true", help="显式启用账密登录、审批和成员自管 Key；先通过本地工具初始化管理员")
     parser.add_argument("--upstream-config", type=Path, help="运营者维护的固定 loopback 模型配置，不含 Key")
     parser.add_argument("--public-origin", help="预发布站点的唯一 HTTPS origin")
     args = parser.parse_args()
+    if args.web_accounts and args.command != 'serve':
+        raise SystemExit('--web-accounts 只用于 serve；管理员初始化请使用 tools/manage_web_accounts.py。')
     args.state = args.state.resolve()
     marker = args.state / "cloud-preview.json"
     public_mode = args.cloud_preview or args.cloud_api
@@ -60,6 +63,8 @@ def main():
     elif args.public_origin:
         raise SystemExit("--public-origin 只能与 --cloud-preview 一起使用。")
     store = Store(args.state / "gateway.sqlite", seed_demo=not public_mode)
+    if args.web_accounts and not store.one("SELECT 1 FROM login_accounts a JOIN users u ON u.id=a.user_id WHERE u.role='admin' AND u.active=1 AND a.status='approved'"):
+        raise SystemExit('尚未初始化管理员账密，未启动新登录模式。请先运行 tools/manage_web_accounts.py。')
     if args.command == "shutdown":
         import httpx
         admin = store.one("SELECT * FROM users WHERE role='admin' AND active=1 LIMIT 1")
@@ -141,6 +146,7 @@ def main():
             else:
                 provider = None
             app = create_app(store, provider=provider, cloud_preview=args.cloud_preview, cloud_api=args.cloud_api, public_origin=args.public_origin,
+                             web_accounts=args.web_accounts,
                              model_catalog_path=catalog_path,
                              project_tools_path=args.state / "project-tools.local.json")
             print(f"Cloud mode: {'text pilot' if args.cloud_api else 'preview'} | loopback:{args.port} | runtime control disabled", flush=True)
@@ -185,7 +191,7 @@ def main():
             time.sleep(0.1)
         else:
             raise SystemExit("模拟控制代理健康检查超时")
-        app = create_app(store, provider, f"http://127.0.0.1:{agent_port}", token)
+        app = create_app(store, provider, f"http://127.0.0.1:{agent_port}", token, web_accounts=args.web_accounts)
         print(f"Local: http://127.0.0.1:{args.port}  | runtime=SIMULATION | text={provider.source}", flush=True)
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=args.port, workers=1, access_log=False))
         app.state.shutdown = lambda: setattr(server, "should_exit", True)

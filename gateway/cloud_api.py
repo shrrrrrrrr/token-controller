@@ -14,8 +14,8 @@ class Credential(BaseModel):
     value: SecretStr
 
 
-def mount_cloud_api(app, store, provider, identity, registered_models, chat_schema):
-    def caller(who=Depends(identity)):
+def mount_cloud_api(app, store, provider, identity, registered_models, chat_schema, api_identity=None):
+    def caller(who=Depends(api_identity or identity)):
         if who["user"]["role"] != "caller":
             raise Fault("member_calling_key_required", 403)
         return who

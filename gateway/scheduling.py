@@ -7,7 +7,7 @@ from typing import Literal
 from fastapi import Depends, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from .store import Fault, canonical, uid
+from .store import Fault, canonical, uid, current_identity
 
 ACTIVE = ('pending', 'approved')
 TRANSITIONS = {'pending': {'pending','approved','rejected','cancelled'},
@@ -35,11 +35,7 @@ class ReservationUpdate(BaseModel):
 
 
 def current_actor(db,who):
-    key=db.execute('SELECT * FROM keys WHERE id=?',(who['key']['id'],)).fetchone()
-    user=db.execute('SELECT * FROM users WHERE id=?',(who['user']['id'],)).fetchone()
-    if not key or key['revoked'] or key['expires']<=time.time() or not user or not user['active']:
-        raise Fault('invalid_or_expired_key',401)
-    return user,key
+    return current_identity(db,who)
 
 
 def notify(db,user_id,title,body,reference):

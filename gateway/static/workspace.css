@@ -3,6 +3,21 @@ body{isolation:isolate;background:#f5f1e3}
 body::before{content:'';position:fixed;inset:0;background:url('/decorations.svg') center bottom/cover no-repeat;pointer-events:none;z-index:-2}
 body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:-1;background:radial-gradient(ellipse at 68% 18%,#e8f1eb55,transparent 65%)}
 .sidebar{background:#f5f1e5ee;backdrop-filter:blur(5px)}
+.sidebar nav{min-height:0;overflow-y:auto;scrollbar-width:thin}
+.nav-group{margin:0;border:0;padding:0}
+.nav-group>summary{display:flex;align-items:center;gap:10px;min-height:42px;padding:8px 12px;list-style:none;cursor:pointer;font-size:14px;color:var(--ink);border-radius:4px}
+.nav-group>summary::-webkit-details-marker{display:none}
+.nav-group>summary::after{content:'›';margin-left:auto;transform:rotate(0deg)}
+.nav-group[open]>summary::after{transform:rotate(90deg)}
+.nav-children{margin:2px 0 8px 13px;border-left:1px solid #cdd8d0;padding-left:7px}
+.nav-children .nav-item{font-size:12px;min-height:34px;padding:6px 8px}
+.nav-children .nav-icon{width:15px;height:15px}
+.account-login .login-form-side{overflow-y:auto;min-height:0}
+.account-login .login-story h1{font-size:34px}
+.auth-links{display:flex;flex-wrap:wrap;gap:6px;margin-top:15px}
+.auth-links .subtle{padding:7px 9px;min-height:36px;font-size:12px}
+.account-login .field{margin-bottom:12px}
+.account-login .notice{padding:10px;font-size:12px}
 .app-header{background:#fbf6e8d9}
 .panel,.metrics{background:#fffdf7f5;box-shadow:3px 3px 0 #132a4909}
 .hero{background:#132a49 url('/decorations.svg') center 40%/cover no-repeat}

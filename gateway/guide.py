@@ -2,6 +2,7 @@
 import json
 
 from .release import RELEASE_NOTES, UI_VERSION
+from .navigation import navigation
 
 ROLE_NAMES = {'admin': '平台管理员', 'operator': '运行操作员', 'caller': '普通成员', 'auditor': '只读审计员'}
 ROLE_PAGES = {
@@ -52,7 +53,7 @@ CLOUD_COMMON = [
 ]
 
 
-def account_guide(store, who, text_source, cloud_preview=False, cloud_api=False):
+def account_guide(store, who, text_source, cloud_preview=False, cloud_api=False, web_accounts=False):
     user, key = who['user'], who['key']
     role = user['role']
     acknowledged = store.one("SELECT id FROM audit WHERE actor=? AND action='guide.ack' AND target=? LIMIT 1",
@@ -72,8 +73,27 @@ def account_guide(store, who, text_source, cloud_preview=False, cloud_api=False)
         steps += CLOUD_COMMON
     else:
         steps = ROLE_STEPS[role] + COMMON
+    pages = list(ROLE_PAGES[role])
+    if web_accounts:
+        pages += ['account']
+        pages += ['registrations', 'keyaudit'] if role == 'admin' else ['mykeys']
+        if who.get('account', {}).get('status') == 'pending':
+            pages = ['account', 'guide', 'notifications']
+        if role == 'admin':
+            steps = [dict(title='审批成员并分配权限', text='成员自行注册用户名和密码，管理员在注册审批中批准并分配模型和额度；默认全部当前登记模型、累计用量不限。已有成员可通过一次性码认领，原ID、Key及用量保留。', target='registrations'),
+                     dict(title='管理账号与额度', text='成员与权限集中管理角色、启停、模型授权和额度。管理员不需要知道成员密码，也不再代发日常调用Key。', target='users'),
+                     dict(title='审计调用凭证', text='成员在我的API自行创建和管理Key。管理员可以查看标识和授权、吊销可疑Key，但不能取回完整值。', target='keyaudit'),
+                     dict(title='核对模型与用量', text='模型服务集中目录、调用检查、运行边界和预约审批。用量与审计保留请求、账本、人工对账及管理审计。云端真实启停、视频和自动切换仍未开放。', target='usage')]
+        else:
+            steps = [dict(title='自己管理调用 Key', text='在我的API创建、调整或吊销自己的Key。完整值仅创建时显示一次，模型范围不能超过账户授权。网页会话不能代替调用Key，Key也不能登录管理网页。', target='mykeys'),
+                     dict(title='调用模型并查看 token', text='在模型服务里填写自己的调用Key进行验证，再查看输入、输出和总token。累计不限仍记账；结果未知时保留原请求ID，不重复提交。', target='play'),
+                     dict(title='预约与工具入口', text='模型服务保留时间窗申请和自己的记录，通知在顶部；项目工具仍沿用原站登录，不转发平台凭证。', target='queue')]
+        steps += [dict(title='修改用户名和密码', text='账户页可修改登录用户名和密码，旧网页会话随之撤销。普通改密不删除API Key；管理员辅助恢复密码会同时撤销旧Key。', target='account'),
+                  dict(title='查看接入边界', text='API只支持已验收的非流式聊天；完整工具协议、SSE和服务端harness尚未开放。大分区里的二级入口和页面功能页签保留原有功能。', target='connect')]
+        if who.get('account', {}).get('status') == 'pending':
+            steps = [dict(title='等待管理员审批', text='你已注册，可管理自己的用户名和密码。管理员批准并分配模型后，才能创建调用 Key、查看模型和发起请求。', target='account')]
     return dict(version=UI_VERSION, role=role, role_name=ROLE_NAMES[role], needs_attention=not acknowledged,
-                allowed_pages=ROLE_PAGES[role], models=models, text_source=text_source,
+                allowed_pages=pages, navigation=navigation(role,pages), models=models, text_source=text_source,
                 runtime_source='disabled' if cloud_preview or cloud_api else 'simulation', steps=steps, changes=RELEASE_NOTES,
-                boundary=('云端受限文本试运行：普通成员获授 Key 可调用非流式文本。管理员凭证不得调用模型；运行控制、视频、SSE、工具协议和独立网页登录会话尚未开放。' if cloud_api else '云端受限预发布：推理与运行控制均关闭。仅验收成员、权限、目录、预约和通知；正式会话与调用 Key scope 分离、模型通道和客户端兼容仍待完成。'
+                boundary=('账密会话与调用Key分离；注册后需管理员审批。云端模型启停、视频、SSE、完整工具协议和服务端harness仍未开放，本地运行演练仍为模拟。' if web_accounts else '云端受限文本试运行：普通成员获授 Key 可调用非流式文本。管理员凭证不得调用模型；运行控制、视频、SSE、工具协议和独立网页登录会话尚未开放。' if cloud_api else '云端受限预发布：推理与运行控制均关闭。仅验收成员、权限、目录、预约和通知；正式会话与调用 Key scope 分离、模型通道和客户端兼容仍待完成。'
                           if cloud_preview else '预约登记、审批和个人通知已实现；自动执行、夜间模型切换、服务端 harness 和真实 GPU 控制尚未上线。'))

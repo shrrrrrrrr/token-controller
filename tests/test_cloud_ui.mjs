@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {test} from 'node:test';
 
-const source=fs.readFileSync(new URL('../gateway/static/app.js',import.meta.url),'utf8');
+const source=fs.readFileSync(new URL('../gateway/static/app.js',import.meta.url),'utf8').replace("import {createAccountsUI} from './accounts.js';",'');
 const model={id:'sample-planned-model',display_name:'任意登记模型 <script>',kind:'text',deployment_status:'planned',authorized:true,callable:false,description:'只登记，未运行'};
 function setup(mode='cloud-preview',role='admin'){
  const elements=new Map(),calls=[];

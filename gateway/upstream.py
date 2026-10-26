@@ -111,8 +111,10 @@ class CloudText:
             self.verified_at = 0
             raise Fault("upstream_outcome_unknown", 502) from None
 
-    async def probe(self, candidate=None):
+    async def probe(self, candidate=None, *, cached=False):
         async with self.probe_lock:
+            if cached and candidate is None and self.ready:
+                return {"model": self.alias, "source": "live_read_only_api_probe", "verified": True}
             secret = self.validate_key(candidate) if candidate is not None else self.secret()
             result = await self._request("GET", "/models", secret)
             if not isinstance(result.get("data"), list) or not any(isinstance(item, dict)

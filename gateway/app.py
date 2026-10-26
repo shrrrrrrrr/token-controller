@@ -61,17 +61,17 @@ class UserInput(Input):
     role: Literal["admin", "caller"]
     models: list[str] = Field(max_length=64)
     profiles: list[Literal["h3-single-v1", "h3-sp2-v1"]] = Field(default_factory=list, max_length=2)
-    budget: int = Field(default=10000, ge=0, le=1000000000)
+    budget: int = Field(default=-1, ge=-1, le=1000000000)
 
 
 class KeyInput(Input):
     user_id: str = Field(max_length=80)
     models: list[str] = Field(max_length=64)
-    budget: int = Field(default=10000, ge=0, le=1000000000)
-    rpm: int = Field(default=30, ge=1, le=1000)
-    tpm: int = Field(default=100000, ge=100, le=10000000)
-    concurrency: int = Field(default=2, ge=1, le=20)
-    days: int = Field(default=30, ge=1, le=365)
+    budget: int = Field(default=-1, ge=-1, le=1000000000)
+    rpm: int = Field(default=60, ge=1, le=1000)
+    tpm: int = Field(default=1000000, ge=100, le=10000000)
+    concurrency: int = Field(default=1, ge=1, le=20)
+    days: int = Field(default=365, ge=1, le=365)
 
 
 class Reconcile(Input):
@@ -93,7 +93,7 @@ class PolicyInput(Input):
 
 
 class BudgetInput(Input):
-    budget: int = Field(ge=0, le=1000000000)
+    budget: int = Field(ge=-1, le=1000000000)
 
 
 class UserPatch(Input):
@@ -328,12 +328,19 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
                 "capabilities": {"inference": not cloud_preview and (not cloud_api or user["role"] == "caller"), "runtime_control": False}}
 
     @app.get("/api/model-catalog")
-    def model_catalog(who=Depends(identity)):
+    async def model_catalog(who=Depends(identity)):
         models = authorized_catalog(who, registered_models())
         if cloud_api:
+            probe_error = None
+            if any(item["id"] == provider.alias for item in models):
+                try:
+                    await provider.probe(cached=True)
+                except Fault as error:
+                    probe_error = error.code
             for item in models:
                 if item["id"] == provider.alias:
-                    item.update(status="ready" if provider.ready else "offline", health="verified" if provider.ready else "unverified",
+                    status = "ready" if provider.ready else "unconfigured" if probe_error == "upstream_credential_not_configured" else "unavailable"
+                    item.update(status=status, health="verified" if provider.ready else "unverified",
                                 callable=provider.ready and item["authorized"] and who["user"]["role"] == "caller",
                                 source="live_api_probe" if provider.ready else "private_configuration_not_live")
         return {"models": models,
@@ -558,7 +565,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
             user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             if not user:
                 raise Fault("user_not_found", 404)
-            if body.budget < user["spent"]+user["reserved"]:
+            if body.budget >= 0 and body.budget < user["spent"]+user["reserved"]:
                 raise Fault("budget_below_committed_amount", 409)
             db.execute("UPDATE users SET budget=? WHERE id=?", (body.budget, user_id))
             store.audit(db, who["user"]["id"], "budget.change", user_id, dict(before=user["budget"], after=body.budget))

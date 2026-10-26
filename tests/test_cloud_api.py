@@ -85,6 +85,103 @@ def test_upstream_key_requires_admin_and_is_never_returned_or_audited(pilot):
     assert client.get("/api/model-catalog", headers=headers["admin"]).json()["models"][0]["callable"] is False
 
 
+def test_catalog_refreshes_expired_health_without_inference(pilot):
+    _, _, _, headers, provider, calls, _, client = pilot
+    provision(pilot)
+    calls.clear()
+    provider.verified_at = 0
+    result = client.get("/api/model-catalog", headers=headers["admin"])
+    assert result.status_code == 200
+    assert result.json()["models"][0]["status"] == "ready"
+    assert [call.method for call in calls] == ["GET"]
+    client.get("/api/model-catalog", headers=headers["admin"])
+    assert len(calls) == 1  # Fresh health is cached, not a probe on every render.
+
+
+def test_catalog_distinguishes_missing_credentials_and_failed_probe(pilot):
+    _, _, _, headers, provider, _, behavior, client = pilot
+    item = client.get("/api/model-catalog", headers=headers["admin"]).json()["models"][0]
+    assert item["status"] == "unconfigured"
+    provision(pilot)
+    provider.verified_at = 0
+    behavior["served_model"] = "wrong-model"
+    item = client.get("/api/model-catalog", headers=headers["admin"]).json()["models"][0]
+    assert item["status"] == "unavailable" and item["callable"] is False
+
+
+def test_unlimited_member_defaults_still_record_exact_usage_and_release(pilot):
+    store, _, _, headers, _, _, _, client = pilot
+    provision(pilot)
+    response = client.post("/api/users", headers=headers["admin"], json={
+        "name": "unlimited-member", "role": "caller", "models": [ALIAS]})
+    assert response.status_code == 201
+    member = response.json()["id"]
+    issued = client.post("/api/keys", headers=headers["admin"], json={"user_id": member, "models": [ALIAS]})
+    assert issued.status_code == 201
+    assert store.one("SELECT budget FROM users WHERE id=?", (member,))["budget"] == -1
+    assert store.one("SELECT budget FROM keys WHERE id=?", (issued.json()["id"],))["budget"] == -1
+    result = client.post("/v1/chat/completions", headers={"Authorization": "Bearer " + issued.json()["key"]},
+                         json={"model": ALIAS, "messages": [{"role": "user", "content": "synthetic"}], "max_tokens": 32})
+    assert result.status_code == 200
+    assert store.one("SELECT spent,reserved FROM users WHERE id=?", (member,)) == {"spent": 10, "reserved": 0}
+    assert store.one("SELECT spent,reserved FROM keys WHERE id=?", (issued.json()["id"],)) == {"spent": 10, "reserved": 0}
+    assert store.one("SELECT COUNT(*) AS n FROM ledger WHERE event='settle'")["n"] == 1
+
+
+@pytest.mark.parametrize("user_budget,key_budget", [(-1, 0), (0, -1)])
+def test_unlimited_one_side_never_bypasses_other_side_limit(pilot, user_budget, key_budget):
+    store, _, users, _, _, _, _, _ = pilot
+    provision(pilot)
+    with store.tx() as db:
+        db.execute("UPDATE users SET budget=? WHERE id=?", (user_budget, users["caller"]))
+        db.execute("UPDATE keys SET budget=? WHERE user_id=?", (key_budget, users["caller"]))
+    assert chat(pilot).status_code == 402
+
+
+def test_admin_can_change_budget_to_unlimited_without_resetting_usage(pilot):
+    store, _, users, headers, _, _, _, client = pilot
+    with store.tx() as db:
+        db.execute("UPDATE users SET spent=15 WHERE id=?", (users["caller"],))
+    result = client.patch("/api/users/" + users["caller"] + "/budget", headers=headers["admin"], json={"budget": -1})
+    assert result.status_code == 200
+    assert store.one("SELECT budget,spent FROM users WHERE id=?", (users["caller"],)) == {"budget": -1, "spent": 15}
+
+
+def test_unlimited_unknown_request_keeps_reservation_and_global_protection(pilot):
+    store, _, users, _, _, calls, behavior, _ = pilot
+    provision(pilot)
+    with store.tx() as db:
+        db.execute("UPDATE users SET budget=-1 WHERE id=?", (users["caller"],))
+        db.execute("UPDATE keys SET budget=-1 WHERE user_id=?", (users["caller"],))
+    behavior["post_error"] = True
+    assert chat(pilot).status_code == 502
+    row = store.one("SELECT status,reserved FROM requests")
+    assert row["status"] == "reconciliation" and row["reserved"] > 0
+    assert store.one("SELECT spent,reserved FROM users WHERE id=?", (users["caller"],)) == {"spent": 0, "reserved": row["reserved"]}
+    assert chat(pilot, key="another-request").status_code == 429
+    assert len([call for call in calls if call.method == "POST"]) == 1
+
+
+def test_concurrent_cached_health_checks_probe_once(pilot):
+    _, _, _, _, provider, _, _, _ = pilot
+    provision(pilot)
+    provider.verified_at = 0
+    reads = []
+
+    async def upstream(request):
+        reads.append(request.method)
+        await asyncio.sleep(0.02)
+        return httpx.Response(200, json={"data": [{"id": CONFIG["served_model"]}]})
+
+    provider.transport = httpx.MockTransport(upstream)
+
+    async def check():
+        return await asyncio.gather(*(provider.probe(cached=True) for _ in range(5)))
+
+    assert len(asyncio.run(check())) == 5
+    assert reads == ["GET"]
+
+
 def test_member_models_and_one_settlement_with_idempotent_replay(pilot):
     store, _, _, headers, _, calls, _, client = pilot
     assert provision(pilot).status_code == 200

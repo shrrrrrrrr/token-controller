@@ -21,6 +21,8 @@ body:not(.signed-out) .sidebar{background-image:url('/decorations.svg');backgrou
 .live-toolbar .secondary{min-height:34px;font-size:12px}
 .client-ack{align-items:flex-start!important;font-size:12px;line-height:1.8}
 .client-ack input{flex-shrink:0;margin-top:4px}
+.key-settings{margin:12px 0 18px;padding:12px;border:1px solid var(--line)}
+.key-settings>summary{cursor:pointer;font-size:13px}
 .guide-new{background:#ffdc91;color:#654710;margin-left:5px;font-size:10px;padding:0 4px;border-radius:2px}
 [hidden]{display:none!important}
 .desktop-stage{min-width:0;min-height:0}

@@ -212,7 +212,8 @@ class Store:
             text_reserved = db.execute("SELECT COALESCE(SUM(reserved),0) FROM requests WHERE key_id=? AND kind='chat' AND created>?", (key_id, now-60)).fetchone()[0]
             if recent[0] >= key["rpm"] or (kind == "chat" and text_reserved+points > key["tpm"]) or active >= key["concurrency"]:
                 raise Fault("rate_or_concurrency_limit", 429)
-            if user["spent"]+user["reserved"]+points > user["budget"] or key["spent"]+key["reserved"]+points > key["budget"]:
+            # -1 explicitly disables the cumulative limit, not usage accounting.
+            if any(row["budget"] >= 0 and row["spent"]+row["reserved"]+points > row["budget"] for row in (user, key)):
                 raise Fault("insufficient_quota", 402)
             if kind == "video":
                 total = db.execute("SELECT COUNT(*) FROM tasks WHERE status IN ('queued','running','reconciliation')").fetchone()[0]
@@ -255,7 +256,7 @@ class Store:
             extra = actual-req["reserved"]
             for table, row_id in [("users", req["user_id"]), ("keys", req["key_id"])]:
                 row = db.execute(f"SELECT * FROM {table} WHERE id=?", (row_id,)).fetchone()
-                if extra > 0 and row["spent"]+row["reserved"]+extra > row["budget"]:
+                if extra > 0 and row["budget"] >= 0 and row["spent"]+row["reserved"]+extra > row["budget"]:
                     raise Fault("reconciliation_requires_budget_increase", 409)
             for table, row_id in [("users", req["user_id"]), ("keys", req["key_id"])]:
                 db.execute(f"UPDATE {table} SET reserved=reserved-?,spent=spent+? WHERE id=?", (req["reserved"], actual, row_id))

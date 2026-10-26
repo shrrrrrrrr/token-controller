@@ -58,6 +58,9 @@ test('membership and key forms use the registered models and only two new roles'
  assert.match(roles,/value="admin"/);assert.match(roles,/value="caller"/);
  assert.doesNotMatch(roles,/value="(?:operator|auditor)"/);
  assert.doesNotMatch(html,/id="(?:user-qwen|user-h3|key-qwen|key-h3|grant-qwen|grant-h3)"/);
+ assert.match(html,/id="user-unlimited" checked/);
+ assert.match(html,/id="key-unlimited" checked/);
+ assert.match(html,/data-model="sample-planned-model" value="sample-planned-model" checked/);
 });
 
 test('cloud login explicitly labels preview and never claims simulated generation',async()=>{

@@ -18,7 +18,7 @@ COMMON = [
 ]
 ROLE_STEPS = {
     'admin': [
-        dict(title='登记成员与调用权限', text='新建账户仅启用管理员和普通成员。模型勾选项来自服务端目录，再设置预算和独立 Key。Key 继承账户角色，管理员 Key 只用于管理网页；客户端应使用普通成员 Key。', target='users'),
+        dict(title='登记成员与调用权限', text='新建账户默认普通成员，勾选全部已登记模型且累计用量不限，仍统计真实用量。可按需收窄模型与额度；已有账号不自动变更。Key 继承账户角色，管理员 Key 只用于管理网页。', target='users'),
         dict(title='核对资产与运行演练', text='模型登记快照不是实时监控。管理员默认具有全部已批准 Profile 的操作资格，仍须检查 GPU 冲突、在途任务和常驻保护。当前本地运行操作只发送到模拟代理。', target='runtime'),
         dict(title='检查用量与待对账项', text='核实上游证据后再结算未知用量，不通过换请求 ID 盲目重发。其他成员的正文和产物不因管理员身份自动开放。', target='usage'),
     ],
@@ -59,10 +59,10 @@ def account_guide(store, who, text_source, cloud_preview=False, cloud_api=False)
                              (user['id'], guide_target(role))) is not None
     models = sorted(set(json.loads(user['models'])) & set(json.loads(key['models']))) if role != 'auditor' else []
     if cloud_api:
-        steps = ([dict(title='发放普通成员调用 Key', text='现有账户和额度继续保留。管理员 Key 只管理平台；为普通成员分配已登记模型、预算及独立 Key。用户与 Key 权限取交集，普通成员 Key 才能调用公网文本 API。', target='users'),
+        steps = ([dict(title='发放普通成员调用 Key', text='新成员默认勾选全部已登记模型且不限制累计用量，仍记录真实 token；成员页面不显示累计点数。新 Key 默认勾选归属用户全部模型，有效365天、每分钟60次、预留上限100万、一个在途请求。高级设置可调整，已有账号额度保留。管理员 Key 只管理平台。', target='users'),
                   dict(title='核对上游与待对账项', text='运营者通过固定 HTTPS 接口登记上游凭证，服务器私有文件保存，不在网页或日志回显。未知提交不自动重试或退款，需要证据对账；未知任务会阻止后续派发。', target='usage')]
                  if role == 'admin' else [dict(title='使用获授的文本模型', text='使用普通成员 Key 调用 OpenAI 非流式 Chat Completions。模型目录只在只读 API 检查通过后显示可用；网关全局同时派发一个文本请求，满载返回429，预约队列不代替推理队列。', target='play')])
-        steps += [dict(title='查看用量与保留请求 ID', text='额度先预留、按真实 usage 结算。对同一请求保留 Idempotency-Key；未知提交不得换 ID 盲目重发。上游调用没有自动重试。', target='usage'),
+        steps += [dict(title='查看用量与保留请求 ID', text='成员用量页显示输入、输出和总 token；不限累计用量也会保留预留、结算及释放记录。已有有限额账户仍按原额度检查。对同一请求保留 Idempotency-Key；未知提交不得换 ID 盲目重发。上游调用没有自动重试。', target='usage'),
                   dict(title='接入边界', text='当前只有非流式文本 API；SSE、工具调用、Responses 和 Anthropic Messages 尚未实现，不代表完整兼容任何 harness。管理网页登录仍使用内存中的 Key，尚未实现独立网页登录会话。', target='connect'),
                   dict(title='预约与工具入口', text='预约只登记时间窗，不自动切换模型。项目工具沿用原站登录，校内工具链接不代表已完成公网代理。模型启停、视频生成和服务端 harness 仍未开放。', target='queue')]
     elif cloud_preview:

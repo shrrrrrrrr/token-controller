@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<title>模型工作台 VR</title>
+<rect width="64" height="64" rx="12" fill="#fbf6e8"/>
+<g fill="none" stroke="#17324d" stroke-width="4" stroke-linecap="square">
+<path d="M46 5H15A10 10 0 0 0 5 15v30M19 59h30a10 10 0 0 0 10-10V19"/>
+</g>
+<path fill="#17324d" d="M10 19h9l10 22 10-22h8L32 50h-7z"/>
+<path fill="#17324d" fill-rule="evenodd" d="M37 19h8c16 0 16 20 4 23l8 8H46l-9-11 4-6h4c6 0 6-7 0-7h-11z"/>
+<circle fill="#168985" cx="54" cy="10" r="5"/><circle fill="#168985" cx="10" cy="54" r="5"/>
+<circle fill="#e6bd68" cx="36" cy="34" r="3"/>
+</svg>

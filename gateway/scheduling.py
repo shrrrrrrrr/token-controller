@@ -8,6 +8,7 @@ from fastapi import Depends, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from .store import Fault, canonical, uid, current_identity
+from .announcements import inbox, mark_read
 
 ACTIVE = ('pending', 'approved')
 TRANSITIONS = {'pending': {'pending','approved','rejected','cancelled'},
@@ -152,24 +153,19 @@ def mount_scheduling(app,store,identity,registered_models=None):
             return dict(id=request_id,status='cancelled')
 
     @app.get('/api/notifications')
-    def notifications(who=Depends(identity),limit: int=Query(default=40,ge=1,le=100)):
-        items=store.rows('SELECT * FROM notifications WHERE user_id=? ORDER BY created DESC LIMIT ?',(who['user']['id'],limit))
-        count=store.one('SELECT COUNT(*) AS count FROM notifications WHERE user_id=? AND read_at IS NULL',(who['user']['id'],))['count']
-        return dict(items=items,unread=count)
+    def notifications(who=Depends(identity),limit: int=Query(default=40,ge=1,le=100),offset: int=Query(default=0,ge=0)):
+        return inbox(store, who['user']['id'], limit=limit, offset=offset, include_announcements=bool(who['user']['active']))
 
     @app.post('/api/notifications/read-all')
     def read_all(who=Depends(identity)):
         with store.tx() as db:
-            user,key=current_actor(db,who)
-            db.execute('UPDATE notifications SET read_at=? WHERE user_id=? AND read_at IS NULL',(time.time(),user['id']))
+            user,key=current_identity(db,who,allow_pending=True)
+            mark_read(db,user)
         return {'read':True}
 
     @app.post('/api/notifications/{notification_id}/read')
     def read_notification(notification_id: str,who=Depends(identity)):
         with store.tx() as db:
-            user,key=current_actor(db,who)
-            row=db.execute('SELECT id FROM notifications WHERE id=? AND user_id=?',(notification_id,user['id'])).fetchone()
-            if not row:
-                raise Fault('notification_not_found',404)
-            db.execute('UPDATE notifications SET read_at=COALESCE(read_at,?) WHERE id=?',(time.time(),notification_id))
+            user,key=current_identity(db,who,allow_pending=True)
+            mark_read(db,user,notification_id)
         return {'read':True}

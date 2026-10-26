@@ -58,6 +58,7 @@ def account_guide(store, who, text_source, cloud_preview=False, cloud_api=False,
     role = user['role']
     acknowledged = store.one("SELECT id FROM audit WHERE actor=? AND action='guide.ack' AND target=? LIMIT 1",
                              (user['id'], guide_target(role))) is not None
+    first_visit = not store.one("SELECT 1 FROM audit WHERE actor=? AND action IN ('guide.seen','guide.ack') LIMIT 1", (user['id'],))
     models = sorted(set(json.loads(user['models'])) & set(json.loads(key['models']))) if role != 'auditor' else []
     if cloud_api:
         steps = ([dict(title='发放普通成员调用 Key', text='新成员默认勾选全部已登记模型且不限制累计用量，仍记录真实 token；成员页面不显示累计点数。新 Key 默认勾选归属用户全部模型，有效365天、每分钟60次、预留上限100万、一个在途请求。高级设置可调整，已有账号额度保留。管理员 Key 只管理平台。', target='users'),
@@ -74,6 +75,8 @@ def account_guide(store, who, text_source, cloud_preview=False, cloud_api=False,
     else:
         steps = ROLE_STEPS[role] + COMMON
     pages = list(ROLE_PAGES[role])
+    if role == 'admin':
+        pages += ['announcements']
     if web_accounts:
         pages += ['account']
         pages += ['registrations', 'keyaudit'] if role == 'admin' else ['mykeys']
@@ -92,7 +95,10 @@ def account_guide(store, who, text_source, cloud_preview=False, cloud_api=False,
                   dict(title='查看接入边界', text='API只支持已验收的非流式聊天；完整工具协议、SSE和服务端harness尚未开放。大分区里的二级入口和页面功能页签保留原有功能。', target='connect')]
         if who.get('account', {}).get('status') == 'pending':
             steps = [dict(title='等待管理员审批', text='你已注册，可管理自己的用户名和密码。管理员批准并分配模型后，才能创建调用 Key、查看模型和发起请求。', target='account')]
-    return dict(version=UI_VERSION, role=role, role_name=ROLE_NAMES[role], needs_attention=not acknowledged,
+    if role == 'admin':
+        steps += [dict(title='编辑与发布公告', text='公告管理中保存草稿、发布或撤回。发布后成员登录优先看到未读公告；编辑保存不改变已发布正文，再次发布会产生新通知。', target='announcements')]
+    steps += [dict(title='首次引导与通知历史', text='使用引导只在首次登录自动提示，以后随时从顶部打开；版本更新只提示入口。顶部通知中心可查看公告和预约消息，分别记录已读与未读。', target='notifications')]
+    return dict(version=UI_VERSION, role=role, role_name=ROLE_NAMES[role], needs_attention=not acknowledged, first_visit=first_visit,
                 allowed_pages=pages, navigation=navigation(role,pages), models=models, text_source=text_source,
                 runtime_source='disabled' if cloud_preview or cloud_api else 'simulation', steps=steps, changes=RELEASE_NOTES,
                 boundary=('账密会话与调用Key分离；注册后需管理员审批。云端模型启停、视频、SSE、完整工具协议和服务端harness仍未开放，本地运行演练仍为模拟。' if web_accounts else '云端受限文本试运行：普通成员获授 Key 可调用非流式文本。管理员凭证不得调用模型；运行控制、视频、SSE、工具协议和独立网页登录会话尚未开放。' if cloud_api else '云端受限预发布：推理与运行控制均关闭。仅验收成员、权限、目录、预约和通知；正式会话与调用 Key scope 分离、模型通道和客户端兼容仍待完成。'

@@ -6,7 +6,7 @@ ADMIN_GROUPS = [
     ('members', '成员与权限', ['registrations', 'users', 'keyaudit']),
     ('records', '用量与审计', ['usage']),
     ('tools', '项目工具', ['tools']),
-    ('settings', '帮助与设置', ['connect', 'guide', 'account']),
+    ('settings', '帮助与设置', ['announcements', 'connect', 'guide', 'account']),
 ]
 MEMBER_GROUPS = [
     ('models', '模型服务', ['play', 'queue']),

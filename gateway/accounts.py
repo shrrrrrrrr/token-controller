@@ -135,7 +135,8 @@ class WebAccounts:
             raise Fault('account_disabled', 401)
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
             self.csrf(request, session)
-        if pending and request.url.path not in ('/api/me', '/api/guide', '/api/guide/ack', '/api/account', '/api/account/profile', '/api/notifications'):
+        pending_path = request.url.path in ('/api/me', '/api/guide', '/api/guide/ack', '/api/guide/seen', '/api/account', '/api/account/profile', '/api/notifications', '/api/notifications/read-all') or (request.url.path.startswith('/api/notifications/') and request.url.path.endswith('/read'))
+        if pending and not pending_path:
             raise Fault('registration_pending', 403)
         if time.time()-session['last_seen'] >= 60:
             with self.store.tx() as db:

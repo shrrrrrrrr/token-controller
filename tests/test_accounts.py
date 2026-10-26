@@ -251,3 +251,18 @@ def test_additive_migration_preserves_legacy_keys_requests_and_ledger(tmp_path):
     WebAccounts(reopened).setup(user, 'retained-member', PASSWORD)
     assert reopened.one('SELECT spent FROM users WHERE id=?', (user,))['spent'] == 10
     assert reopened.rows('SELECT * FROM ledger') == before['ledger']
+
+
+def test_announcements_require_session_csrf_and_pending_accounts_are_excluded(accounts):
+    _,app,admin,_,legacy=accounts
+    headers=login(admin)
+    body={'title':'合成公告','body':'Synthetic pending-account boundary'}
+    assert admin.post('/api/announcements',json=body).status_code==403
+    assert TestClient(app,base_url=ORIGIN).post('/api/announcements',headers={'Authorization':'Bearer '+legacy['key']},json=body).status_code==401
+    created=admin.post('/api/announcements',headers=headers,json=body).json()
+    assert admin.post('/api/announcements/'+created['id']+'/publish',headers=headers,json={'expected_revision':1}).status_code==200
+    pending=TestClient(app,base_url=ORIGIN)
+    pending.post('/api/auth/register',headers=context(pending),json={'username':'pending-notices','password':PASSWORD,'display_name':'Pending'})
+    login(pending,'pending-notices')
+    assert pending.get('/api/notifications').json()['unread_announcements']==[]
+    assert pending.post('/api/guide/seen',headers=context(pending),json={}).status_code==200

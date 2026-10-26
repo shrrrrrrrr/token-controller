@@ -7,8 +7,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 IGNORED_DIRS = {'.git', '.state', '.venv', '__pycache__', '.pytest_cache', 'node_modules'}
-# Only this reviewed, OFL-licensed font may be binary; changed bytes fail closed.
+# Reviewed font and approved generated brand mark; changed bytes fail closed.
 PUBLIC_BINARIES = {
+    'gateway/static/brand-mark.png': '375d881389744d1b9e625f53e0a36eea350bf109aaee48883371028dbeae35fc',
     'gateway/static/fonts/ChillReunion-Round.woff2': '4f4e36dd0601c5fa325c6634649494767e9e7a0da8cc7b1fc9496ba1f7438288',
 }
 PATTERNS = {

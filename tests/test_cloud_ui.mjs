@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {test} from 'node:test';
 
-const source=fs.readFileSync(new URL('../gateway/static/app.js',import.meta.url),'utf8').replace("import {createAccountsUI} from './accounts.js';",'');
+const source=fs.readFileSync(new URL('../gateway/static/app.js',import.meta.url),'utf8').replace(/^import .*;$/gm,'');
 const model={id:'sample-planned-model',display_name:'任意登记模型 <script>',kind:'text',deployment_status:'planned',authorized:true,callable:false,description:'只登记，未运行'};
 function setup(mode='cloud-preview',role='admin'){
  const elements=new Map(),calls=[];
@@ -19,7 +19,7 @@ function setup(mode='cloud-preview',role='admin'){
   '/api/users':[{id:'user-member',name:'示例成员',role:'caller',active:1,models:JSON.stringify([model.id]),profiles:'[]',budget:100,spent:0,reserved:0}],
   '/api/keys':[],
  };
- const context=vm.createContext({document,console,setTimeout,clearTimeout,setInterval,clearInterval,crypto:{randomUUID:()=> 'test-request-id'},location:{origin:'https://models.example.invalid'},fetch:async path=>{calls.push(path);if(mode==='cloud-preview')assert.ok(!path.startsWith('/v1'),'Cloud views must not access disabled inference routes');if(!(path in responses))throw new Error('Unexpected request '+path);return {ok:true,status:200,json:async()=>responses[path]}},matchMedia:()=>({matches:false}),requestAnimationFrame:()=>{}});
+ const context=vm.createContext({createMessagesUI:()=>({reset(){}}),document,console,setTimeout,clearTimeout,setInterval,clearInterval,crypto:{randomUUID:()=> 'test-request-id'},location:{origin:'https://models.example.invalid'},fetch:async path=>{calls.push(path);if(mode==='cloud-preview')assert.ok(!path.startsWith('/v1'),'Cloud views must not access disabled inference routes');if(!(path in responses))throw new Error('Unexpected request '+path);return {ok:true,status:200,json:async()=>responses[path]}},matchMedia:()=>({matches:false}),requestAnimationFrame:()=>{}});
  vm.runInContext(source.replace('void initialize();',''),context);
  vm.runInContext('me='+JSON.stringify(identity)+'; environment={mode:'+JSON.stringify(mode)+'};',context);
  return {context,calls,elements,run:code=>vm.runInContext(code,context)};

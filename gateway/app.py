@@ -22,6 +22,7 @@ from .project_tools import configured_tools
 from .guide import account_guide, guide_target
 from .release import UI_VERSION
 from .scheduling import mount_scheduling, current_actor
+from .announcements import mount_announcements
 from .store import Fault, Store, canonical, uid
 
 STATIC = Path(__file__).parent / "static"
@@ -292,6 +293,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         return check
 
     mount_scheduling(app,store,identity,registered_models)
+    mount_announcements(app,store,identity)
     if cloud_api:
         mount_cloud_api(app, store, provider, identity, registered_models, Chat, api_identity=bearer_identity)
 
@@ -313,6 +315,18 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     @app.get('/accounts.js')
     def account_script():
         return FileResponse(STATIC / 'accounts.js', media_type='application/javascript')
+
+    @app.get('/messages.js')
+    def messages_script():
+        return FileResponse(STATIC / 'messages.js', media_type='application/javascript')
+
+    @app.get('/brand-mark.png')
+    def brand_mark():
+        return FileResponse(STATIC / 'brand-mark.png', media_type='image/png')
+
+    @app.get('/favicon.svg')
+    def favicon():
+        return FileResponse(STATIC / 'favicon.svg', media_type='image/svg+xml')
 
     @app.get("/style.css")
     def css():
@@ -377,6 +391,16 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
             if not db.execute("SELECT id FROM audit WHERE actor=? AND action='guide.ack' AND target=? LIMIT 1", (who['user']['id'], target)).fetchone():
                 store.audit(db, who['user']['id'], 'guide.ack', target, dict(version=UI_VERSION, role=who['user']['role']))
         return {'version': UI_VERSION, 'acknowledged': True}
+
+    @app.post('/api/guide/seen')
+    def guide_seen(who=Depends(identity)):
+        from .store import current_identity
+        with store.tx() as db:
+            user, _ = current_identity(db, who, allow_pending=True)
+            previous = db.execute("SELECT 1 FROM audit WHERE actor=? AND action IN ('guide.seen','guide.ack') LIMIT 1", (user['id'],)).fetchone()
+            if not previous:
+                store.audit(db,user['id'],'guide.seen','first-login',{'version': UI_VERSION})
+        return {'first_visit': not bool(previous)}
 
     @app.get('/decorations.svg')
     def decorations():

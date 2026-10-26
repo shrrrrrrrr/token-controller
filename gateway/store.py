@@ -25,7 +25,7 @@ def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def current_identity(db, who):
+def current_identity(db, who, *, allow_pending=False):
     """Recheck session/key ownership and current grants inside write transactions."""
     user = db.execute("SELECT * FROM users WHERE id=?", (who["user"]["id"],)).fetchone()
     if "session" in who:
@@ -33,8 +33,8 @@ def current_identity(db, who):
         account = db.execute("SELECT status FROM login_accounts WHERE user_id=?", (who["user"]["id"],)).fetchone()
         now = time.time()
         if (not session or session["user_id"] != who["user"]["id"] or session["expires"] <= now
-                or session["last_seen"] <= now-1800 or not account or account["status"] != "approved"
-                or not user or not user["active"]):
+                or session["last_seen"] <= now-1800 or not account
+                or not user or not (account['status']=='approved' and user['active'] or allow_pending and account['status']=='pending')):
             raise Fault("session_expired", 401)
         return user, dict(id="web-session", user_id=user["id"], models=user["models"], budget=user["budget"])
     key = db.execute("SELECT * FROM keys WHERE id=?", (who["key"]["id"],)).fetchone()
@@ -116,6 +116,19 @@ CREATE TABLE IF NOT EXISTS key_labels (
  key_id TEXT PRIMARY KEY REFERENCES keys(id), name TEXT NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_rate (
  bucket TEXT PRIMARY KEY, reset REAL NOT NULL, count INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS announcements (
+ id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('draft','published','withdrawn')),
+ revision INTEGER NOT NULL DEFAULT 1, published_revision INTEGER NOT NULL DEFAULT 0,
+ author TEXT NOT NULL REFERENCES users(id), created REAL NOT NULL, updated REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS announcement_publications (
+ id TEXT PRIMARY KEY, announcement_id TEXT NOT NULL REFERENCES announcements(id),
+ revision INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, created REAL NOT NULL,
+ UNIQUE(announcement_id,revision));
+CREATE TABLE IF NOT EXISTS announcement_reads (
+ publication_id TEXT NOT NULL REFERENCES announcement_publications(id),
+ user_id TEXT NOT NULL REFERENCES users(id), read_at REAL NOT NULL,
+ PRIMARY KEY(publication_id,user_id));
 """
 
 

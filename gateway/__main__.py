@@ -30,7 +30,11 @@ def main():
     parser.add_argument("--public-origin", help="预发布站点的唯一 HTTPS origin")
     parser.add_argument('--inference-slots',type=int,choices=(1,2,3),default=None,
                         help='已验收的同时推理数；真实服务默认1，本地模拟默认3，工作流上限固定3')
+    parser.add_argument('--native-context',action='store_true',
+                        help='为已验收的固定llama.cpp引擎启用模板分词检查；只用于cloud-api')
     args = parser.parse_args()
+    if args.native_context and not args.cloud_api:
+        raise SystemExit('--native-context requires --cloud-api')
     runtime_client=None
     if args.runtime_agent_config:
         if not args.cloud_api:
@@ -155,7 +159,7 @@ def main():
                     raise SystemExit(str(exc)) from None
                 if not any(item["id"] == config["alias"] and item["kind"] == "text" for item in load_model_catalog(catalog_path, cloud_preview=True)):
                     raise SystemExit("固定上游 alias 必须已登记为文本模型。")
-                provider = CloudText(config, args.state)
+                provider = CloudText(config, args.state, native_context=args.native_context)
             else:
                 provider = None
             app = create_app(store, provider=provider, cloud_preview=args.cloud_preview, cloud_api=args.cloud_api, public_origin=args.public_origin,

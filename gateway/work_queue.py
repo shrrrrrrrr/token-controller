@@ -99,7 +99,9 @@ class WorkQueue:
     def enqueue(self,who,body,idem,job_id=None):
         data=body.payload();encoded=canonical(data)
         points=len(canonical({'messages':data['messages'],'tools':data.get('tools',[])}).encode())+body.max_tokens+512
-        if points>16384:raise Fault('conservative_context_limit',400)
+        if getattr(self.provider,'native_context',False):
+            if len(encoded.encode())>262144:raise Fault('request_too_large',413)
+        elif points>16384:raise Fault('conservative_context_limit',400)
         idem=idem or uid('auto_')
         # Account-wide idempotency prevents a retry from creating a second implicit job.
         old=self.store.one('SELECT * FROM work_calls WHERE key_id=? AND idem=?',(who['key']['id'],idem))
@@ -303,6 +305,9 @@ class WorkQueue:
             body=json.loads(call['body']);who=self.who(call['key_id']);route=await self.resolve(job['model'])
             if job['status']!='running':raise Fault('task_cancelled',409)
             points=len(canonical({'messages':body['messages'],'tools':body.get('tools',[])}).encode())+body['max_tokens']+512
+            if getattr(self.provider,'native_context',False):
+                with self.store.connect() as db:self.authorize(db,who,job['model'])
+                points=await self.provider.context_points(body)
             request,fresh=self.store.admit(who,'work:'+call['id'],body,'chat',job['model'],points,
                 route['profile'],route['profile_hash'],runtime_required=route['runtime_required'],
                 global_concurrency=self.slots,required_role='caller',source=self.provider.source)
@@ -358,6 +363,15 @@ class WorkQueue:
                 if changed:raise Fault('queue_wait_timeout',429)
             await asyncio.sleep(.04)
 
+    @staticmethod
+    def failure_response(row,headers):
+        status=502 if row['status']=='reconciliation' else {'rate_or_concurrency_limit':429,'insufficient_quota':402,
+            'context_length_exceeded':400,'request_too_large':413}.get(row['error'],503)
+        if status==429:headers['Retry-After']='10'
+        if row['status']=='reconciliation':headers['X-Should-Retry']='false'
+        return JSONResponse({'error':{'code':row['error'] or 'task_failed'},'request_id':row.get('request_id'),
+                             'submitted_to_model':row['status']=='reconciliation'},status_code=status,headers=headers)
+
     async def chat(self,body,who,idem,job_id=None):
         previous=self.store.one('SELECT status FROM work_calls WHERE key_id=? AND idem=?',(who['key']['id'],idem)) if idem else None
         if previous and previous['status']=='reconciliation':raise Fault('request_reconciliation',409)
@@ -369,6 +383,10 @@ class WorkQueue:
         headers={'X-Task-ID':call['job_id'],'X-Call-ID':call['id']}
         if call['status']=='completed':headers['X-Idempotent-Replay']='true'
         if row.get('request_id'):headers['X-Request-ID']=row['request_id']
+        # Preflight failures are known before stream headers, so SDKs receive
+        # the real HTTP error instead of a misleading successful SSE response.
+        if row['status']=='failed' and not row.get('request_id'):
+            return self.failure_response(row,headers)
         if body.stream:
             async def events():
                 if sum(self.subscribers.values())>=30:
@@ -401,11 +419,7 @@ class WorkQueue:
             await asyncio.sleep(.04);row=self.call(call['id'],who)
         if row.get('request_id'):headers['X-Request-ID']=row['request_id']
         if row['status']=='completed' and row['result']:return JSONResponse(row['result'],headers=headers)
-        status=502 if row['status']=='reconciliation' else {'rate_or_concurrency_limit':429,'insufficient_quota':402}.get(row['error'],503)
-        if status==429:headers['Retry-After']='10'
-        if row['status']=='reconciliation':headers['X-Should-Retry']='false'
-        return JSONResponse({'error':{'code':row['error'] or 'task_failed'},'request_id':row.get('request_id'),
-                             'submitted_to_model':row['status']=='reconciliation'},status_code=status,headers=headers)
+        return self.failure_response(row,headers)
 
 
 def mount_work_queue(app,queue,identity,api_identity):

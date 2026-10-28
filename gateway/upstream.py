@@ -21,6 +21,9 @@ from .providers import verified_usage
 from .timeouts import GENERATION_SECONDS
 
 MAX_RESPONSE = 2 * 1024 * 1024
+MAX_CONTEXT_INPUT = 256 * 1024
+CONTEXT_TOKENS = 16384
+CONTEXT_MARGIN = 512
 KEY = re.compile(r"[A-Za-z0-9_.-]{24,256}\Z")
 MODEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,95}\Z")
 
@@ -49,7 +52,9 @@ def load_upstream_config(path):
 class CloudText:
     source = "cloud_loopback_openai"
 
-    def __init__(self, config, state, *, transport=None):
+    def __init__(self, config, state, *, transport=None, native_context=False):
+        if type(native_context) is not bool:raise ValueError('native context must be explicit boolean')
+        self.native_context = native_context
         override=Path(state)/'runtime-route.local.json'
         if override.exists():
             routed=load_upstream_config(override)
@@ -61,6 +66,10 @@ class CloudText:
         self.key_path = Path(state) / "upstream-api.key"
         self.profile = "cloud-text-v1"
         self.profile_hash = hashlib.sha256(canonical(config).encode()).hexdigest()
+        if native_context:
+            self.profile = 'cloud-text-native-context-v1'
+            self.profile_hash = hashlib.sha256(canonical({'route':config,'context_tokens':CONTEXT_TOKENS,
+                'context_margin':CONTEXT_MARGIN,'native_context':True}).encode()).hexdigest()
         self.verified_at = 0
         self.rotating = False
         self.transport = transport
@@ -153,11 +162,60 @@ class CloudText:
             if os.path.exists(name):
                 os.unlink(name)
 
-    async def complete(self, body):
-        from .protocols import validate_completion
+    def inference_payload(self, body, *, stream=False):
         payload = dict(body)
         payload.pop('stream_options',None)
-        payload.update(model=self.config["served_model"], stream=False)
+        payload.update(model=self.config['served_model'],stream=stream)
+        if stream:payload['stream_options']={'include_usage':True}
+        return payload
+
+    async def _context_request(self, path, body):
+        """Fixed native metadata endpoints, never a caller-supplied URL or retry."""
+        parsed=urlsplit(self.config['base_url'])
+        if (path not in ('/apply-template','/tokenize') or parsed.scheme!='http' or parsed.hostname!='127.0.0.1'
+                or not parsed.port or parsed.path!='/v1' or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            raise Fault('context_budget_unavailable',503)
+        try:
+            async with asyncio.timeout(12):
+                async with httpx.AsyncClient(timeout=httpx.Timeout(12,connect=4),trust_env=False,
+                        follow_redirects=False,transport=self.transport) as client:
+                    async with client.stream('POST',self.config['base_url'][:-3]+path,json=body,
+                            headers={'Authorization':'Bearer '+self.secret(),'Accept-Encoding':'identity'}) as response:
+                        if response.status_code!=200 or response.headers.get('content-encoding','identity')!='identity':
+                            raise Fault('context_budget_unavailable',503)
+                        raw=bytearray()
+                        async for chunk in response.aiter_bytes():
+                            raw.extend(chunk)
+                            if len(raw)>MAX_RESPONSE:raise Fault('context_budget_unavailable',503)
+                        document=json.loads(raw)
+                        if not isinstance(document,dict):raise ValueError()
+                        return document
+        except Fault:raise
+        except (httpx.HTTPError,TimeoutError,ValueError):
+            raise Fault('context_budget_unavailable',503) from None
+
+    async def context_points(self, body):
+        if not self.native_context:raise Fault('context_budget_unavailable',503)
+        if len(canonical(body).encode())>MAX_CONTEXT_INPUT:raise Fault('request_too_large',413)
+        await self.probe(cached=True)
+        # Use the same normalized generation fields: tools, history and reasoning
+        # must reach the renderer too. No prompt or token-list cache is persisted.
+        rendered=await self._context_request('/apply-template',self.inference_payload(body))
+        prompt=rendered.get('prompt')
+        if not isinstance(prompt,str) or not prompt or len(prompt.encode())>2*MAX_CONTEXT_INPUT:
+            raise Fault('context_budget_unavailable',503)
+        document=await self._context_request('/tokenize',{'content':prompt,'add_special':False,'parse_special':True})
+        tokens=document.get('tokens')
+        if (not isinstance(tokens,list) or not tokens or len(tokens)>MAX_CONTEXT_INPUT
+                or any(type(value) is not int or value<0 for value in tokens)):
+            raise Fault('context_budget_unavailable',503)
+        points=len(tokens)+body['max_tokens']+CONTEXT_MARGIN
+        if points>CONTEXT_TOKENS:raise Fault('context_length_exceeded',400)
+        return points
+
+    async def complete(self, body):
+        from .protocols import validate_completion
+        payload = self.inference_payload(body)
         result = await self._request("POST", "/chat/completions", self.secret(), payload)
         result=validate_completion(result,self.config['served_model'],body['max_tokens'])
         result['model']=self.alias
@@ -165,8 +223,7 @@ class CloudText:
 
     async def stream(self, body):
         """Relay bounded real SSE; final usage is required before settlement."""
-        payload=dict(body)
-        payload.update(model=self.config['served_model'],stream=True,stream_options={'include_usage':True})
+        payload=self.inference_payload(body,stream=True)
         try:
             async with asyncio.timeout(GENERATION_SECONDS):
                 async with httpx.AsyncClient(timeout=httpx.Timeout(GENERATION_SECONDS,connect=4),trust_env=False,

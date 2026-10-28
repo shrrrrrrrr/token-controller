@@ -13,6 +13,7 @@ ROLE_PAGES = {
 }
 
 COMMON = [
+    dict(title='长输入检查', text='固定引擎验收后，管理员可启用原生模板分词检查。超过上下文容量时会在生成前拒绝，不自动删减材料；分词接口异常时也不会提交生成', target='connect'),
     dict(title='预约与个人通知', text='模型排队支持脱敏概览、获授模型申请和管理员排程。通知中心接收自己的审批消息。当前只登记预约，不执行推理；客户端型任务执行时需保持 harness 后台和网络可用，不要求一直登录网页。', target='queue'),
     dict(title='了解连接方式', text='在接入指南复制 API 地址，使用自己的调用 Key。文本API支持流式聊天和函数工具，真实harness工作流需部署后验收。', target='connect'),
     dict(title='进入项目工具', text='工具沿用原站登录。平台不会把 API Key 发送给工具网站，内嵌受限时可以在原站打开。', target='tools'),

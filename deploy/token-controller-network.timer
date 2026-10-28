@@ -1,0 +1,11 @@
+[Unit]
+Description=Check campus network without an interactive login session
+
+[Timer]
+OnBootSec=90
+OnUnitInactiveSec=60
+RandomizedDelaySec=10
+Unit=token-controller-network.service
+
+[Install]
+WantedBy=timers.target

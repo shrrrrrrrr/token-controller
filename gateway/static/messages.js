@@ -9,8 +9,8 @@ export function createMessagesUI(options){
   dialog=document.createElement('dialog');dialog.id='login-dialog';dialog.className='login-dialog';
   const guide=item.kind==='guide';
   dialog.setAttribute('aria-labelledby','login-dialog-title');
-  dialog.innerHTML=`<div class="message-dialog-head"><span class="eyebrow">${guide?'FIRST VISIT':'ANNOUNCEMENT'}</span><h2 id="login-dialog-title">${esc(item.title)}</h2><p class="field-help">${guide?'首次使用提示，以后可从顶部“使用引导”打开。':date(item.created)+' · '+(item.kind==='announcement'?'管理员公告':'个人消息')+' · '+(item.read_at?'已读':'未读')}</p></div><div class="message-dialog-content">${guide?item.steps.map(step=>`<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join(''):`<p class="message-body">${esc(item.body)}</p>`}</div><div class="message-dialog-actions"><button class="secondary" id="message-later">${guide?'关闭，进入工作台':'稍后查看'}</button>${guide?'<button class="primary" id="message-guide">打开完整引导</button>':'<button class="primary" id="message-read">已阅读</button>'}</div>`;
-  document.body.append(dialog);
+  dialog.innerHTML=`<div class="message-dialog-head"><span class="eyebrow">${guide?'FIRST VISIT':'ANNOUNCEMENT'}</span><h2 id="login-dialog-title">${esc(item.title)}</h2><p class="field-help">${guide?'首次使用提示，以后可从顶部“使用引导”打开':date(item.created)+' · '+(item.kind==='announcement'?'管理员公告':'个人消息')+' · '+(item.read_at?'已读':'未读')}</p></div><div class="message-dialog-content">${guide?item.steps.map(step=>`<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join(''):`<p class="message-body">${esc(item.body)}</p>`}</div><div class="message-dialog-actions"><button class="secondary" id="message-later">${guide?'关闭，进入工作台':'稍后查看'}</button>${guide?'<button class="primary" id="message-guide">打开完整引导</button>':'<button class="primary" id="message-read">已阅读</button>'}</div>`;
+  document.body.append(dialog);options.tidyCopy?.();
   const current=dialog,epoch=generation;
   current.onclose=()=>{current.remove();if(dialog===current)dialog=null;if(epoch===generation)after()};
   current.querySelector('#message-later').onclick=()=>current.close();

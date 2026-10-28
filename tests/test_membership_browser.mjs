@@ -22,7 +22,7 @@ test('member drafts survive clicks; defaults and key grants submit once without 
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  let browser;
  try{
-  browser=await chromium.launch({headless:true});
+  browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EXECUTABLE_PATH?{executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:1000}});
   const calls=[],writes=[];
   const model={id:'research-text',display_name:'合成研究模型',kind:'text',status:'ready',deployment_status:'offline',authorized:true,callable:false,description:'测试目录'};

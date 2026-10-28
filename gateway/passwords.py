@@ -25,7 +25,7 @@ def normalize_username(value):
 
 def validate_password(value, username=''):
     value = unicodedata.normalize('NFC', value)
-    if not 15 <= len(value) <= 128 or len(value.encode('utf-8')) > 512:
+    if not 6 <= len(value) <= 128 or len(value.encode('utf-8')) > 512:
         raise Fault('password_length', 400)
     if (value.casefold() in COMMON_PASSWORDS or len(set(value)) == 1
             or value.casefold() == username.casefold()):

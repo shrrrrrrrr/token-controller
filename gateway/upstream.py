@@ -18,6 +18,7 @@ import httpx
 
 from .store import Fault, canonical
 from .providers import verified_usage
+from .timeouts import GENERATION_SECONDS
 
 MAX_RESPONSE = 2 * 1024 * 1024
 KEY = re.compile(r"[A-Za-z0-9_.-]{24,256}\Z")
@@ -49,6 +50,12 @@ class CloudText:
     source = "cloud_loopback_openai"
 
     def __init__(self, config, state, *, transport=None):
+        override=Path(state)/'runtime-route.local.json'
+        if override.exists():
+            routed=load_upstream_config(override)
+            if routed['base_url']!=config['base_url']:
+                raise ValueError('runtime override may not change the fixed upstream endpoint')
+            config=routed
         self.config = dict(config)
         self.alias = config["alias"]
         self.key_path = Path(state) / "upstream-api.key"
@@ -86,8 +93,8 @@ class CloudText:
 
     async def _request(self, method, path, secret, body=None):
         try:
-            async with asyncio.timeout(12 if method == "GET" else 150):
-                async with httpx.AsyncClient(timeout=httpx.Timeout(8 if method == "GET" else 120, connect=4), trust_env=False,
+            async with asyncio.timeout(12 if method == "GET" else GENERATION_SECONDS):
+                async with httpx.AsyncClient(timeout=httpx.Timeout(8 if method == "GET" else GENERATION_SECONDS, connect=4), trust_env=False,
                                              follow_redirects=False, transport=self.transport) as client:
                     async with client.stream(method, self.config["base_url"] + path,
                             headers={"Authorization": "Bearer " + secret, "Accept-Encoding": "identity"}, json=body) as response:
@@ -147,23 +154,47 @@ class CloudText:
                 os.unlink(name)
 
     async def complete(self, body):
-        payload = {name: body[name] for name in ("messages", "max_tokens", "temperature")}
+        from .protocols import validate_completion
+        payload = dict(body)
+        payload.pop('stream_options',None)
         payload.update(model=self.config["served_model"], stream=False)
         result = await self._request("POST", "/chat/completions", self.secret(), payload)
-        if result.get("model") != self.config["served_model"]:
-            raise Fault("upstream_response_model_mismatch", 502)
-        choices = result.get("choices")
-        if not isinstance(choices, list) or len(choices) != 1:
-            raise Fault("upstream_response_invalid", 502)
-        choice = choices[0]
-        message = choice.get("message") if isinstance(choice, dict) else None
-        if (not isinstance(message, dict) or message.get("role") != "assistant"
-                or not isinstance(message.get("content"), str) or message.get("tool_calls")
-                or choice.get("finish_reason") not in ("stop", "length")):
-            raise Fault("upstream_response_invalid", 502)
-        prompt, completion, total = verified_usage(result)
-        return {"id": str(result.get("id", ""))[:160], "object": "chat.completion",
-                "created": int(time.time()), "model": self.alias,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": message["content"]},
-                             "finish_reason": choice["finish_reason"]}],
-                "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}}
+        result=validate_completion(result,self.config['served_model'],body['max_tokens'])
+        result['model']=self.alias
+        return result
+
+    async def stream(self, body):
+        """Relay bounded real SSE; final usage is required before settlement."""
+        payload=dict(body)
+        payload.update(model=self.config['served_model'],stream=True,stream_options={'include_usage':True})
+        try:
+            async with asyncio.timeout(GENERATION_SECONDS):
+                async with httpx.AsyncClient(timeout=httpx.Timeout(GENERATION_SECONDS,connect=4),trust_env=False,
+                        follow_redirects=False,transport=self.transport) as client:
+                    async with client.stream('POST',self.config['base_url']+'/chat/completions',
+                            json=payload,headers={'Authorization':'Bearer '+self.secret(),'Accept-Encoding':'identity'}) as response:
+                        if response.status_code!=200 or not response.headers.get('content-type','').startswith('text/event-stream'):
+                            raise Fault('upstream_stream_invalid',502)
+                        if response.headers.get('content-encoding','identity')!='identity':
+                            raise Fault('upstream_response_encoding_not_supported',502)
+                        size=0;buffer=b'';data=[];done=False
+                        async for raw in response.aiter_bytes():
+                            size+=len(raw);buffer+=raw
+                            if size>MAX_RESPONSE:raise Fault('upstream_response_too_large',502)
+                            while b'\n' in buffer:
+                                line,buffer=buffer.split(b'\n',1);line=line.rstrip(b'\r')
+                                if line.startswith(b'data:'):data.append(line[5:].lstrip())
+                                elif not line and data:
+                                    encoded=b'\n'.join(data);data=[]
+                                    if encoded==b'[DONE]':done=True;break
+                                    chunk=json.loads(encoded)
+                                    if not isinstance(chunk,dict) or chunk.get('model')!=self.config['served_model']:
+                                        raise Fault('upstream_response_model_mismatch',502)
+                                    chunk['model']=self.alias
+                                    yield chunk
+                            if done:break
+                        if not done:raise Fault('upstream_stream_incomplete',502)
+        except Fault:raise
+        except (httpx.HTTPError,TimeoutError,ValueError,UnicodeError):
+            self.verified_at=0
+            raise Fault('upstream_outcome_unknown',502) from None

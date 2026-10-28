@@ -54,7 +54,7 @@ def public_request(row,viewer):
     return result
 
 
-def mount_scheduling(app,store,identity,registered_models=None):
+def mount_scheduling(app,store,identity,registered_models=None,requests_enabled=False):
     @app.get('/api/model-requests')
     def requests(who=Depends(identity)):
         rows=store.rows("SELECT * FROM model_requests WHERE status IN ('pending','approved') ORDER BY CASE status WHEN 'approved' THEN 0 ELSE 1 END,priority,COALESCE(scheduled_start,preferred_start,created),created LIMIT 100")
@@ -71,6 +71,8 @@ def mount_scheduling(app,store,identity,registered_models=None):
 
     @app.post('/api/model-requests',status_code=202)
     def submit(body: ReservationInput,who=Depends(identity)):
+        if not requests_enabled:
+            raise Fault('model_request_not_launched', 503)
         if registered_models and body.model not in {m['id'] for m in registered_models()}:
             raise Fault('model_not_registered',400)
         body_hash=hashlib.sha256(canonical(body.model_dump()).encode()).hexdigest()

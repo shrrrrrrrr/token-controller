@@ -29,6 +29,83 @@ def login(client, username='fixture-admin', password=PASSWORD):
     return {'Origin': ORIGIN, 'X-CSRF-Token': result.json()['csrf_token']}
 
 
+def test_password_change_requires_verified_session_and_preserves_keys(accounts):
+    store, app, client, admin, legacy = accounts
+    headers = login(client)
+    keys_before = store.rows('SELECT * FROM keys')
+    wrong = client.post('/api/account/password/verify', headers=headers, json={'current_password': 'incorrect synthetic password'})
+    assert wrong.status_code == 401
+    assert not store.rows('SELECT * FROM password_change_intents')
+    verified = client.post('/api/account/password/verify', headers=headers, json={'current_password': PASSWORD})
+    assert verified.status_code == 200 and verified.headers['cache-control'] == 'no-store'
+    proof = verified.json()['verification_token']
+    assert proof not in str(store.rows('SELECT * FROM password_change_intents'))
+    changed = client.post('/api/account/password/change', headers=headers, json={'verification_token': proof, 'new_password': NEXT_PASSWORD})
+    assert changed.status_code == 200
+    assert store.rows('SELECT * FROM keys') == keys_before
+    assert not store.rows('SELECT * FROM password_change_intents')
+    next_headers = {'Origin': ORIGIN, 'X-CSRF-Token': changed.json()['csrf_token']}
+    assert client.post('/api/account/password/change', headers=next_headers, json={'verification_token': proof, 'new_password': PASSWORD}).status_code == 401
+    assert client.get('/api/account').status_code == 200
+    assert client.post('/api/account/password/verify', headers=next_headers, json={'current_password': PASSWORD}).status_code == 401
+    assert verify_password(NEXT_PASSWORD, store.one('SELECT password_hash FROM login_accounts WHERE user_id=?', (admin,))['password_hash'])
+
+
+def test_password_verification_expiration_csrf_and_latest_proof(accounts):
+    store, app, client, admin, legacy = accounts
+    headers = login(client)
+    assert client.post('/api/account/password/verify', json={'current_password': PASSWORD}).status_code == 403
+    first = client.post('/api/account/password/verify', headers=headers, json={'current_password': PASSWORD}).json()['verification_token']
+    second = client.post('/api/account/password/verify', headers=headers, json={'current_password': PASSWORD}).json()['verification_token']
+    assert client.post('/api/account/password/change', headers=headers, json={'verification_token': first, 'new_password': NEXT_PASSWORD}).status_code == 401
+    with store.tx() as db:
+        db.execute('UPDATE password_change_intents SET expires=?', (time.time()-1,))
+    assert client.post('/api/account/password/change', headers=headers, json={'verification_token': second, 'new_password': NEXT_PASSWORD}).status_code == 401
+    assert verify_password(PASSWORD, store.one('SELECT password_hash FROM login_accounts WHERE user_id=?', (admin,))['password_hash'])
+
+
+def test_password_proof_cannot_move_to_another_session(accounts):
+    store, app, client, admin, legacy = accounts
+    headers = login(client)
+    proof = client.post('/api/account/password/verify', headers=headers, json={'current_password': PASSWORD}).json()['verification_token']
+    with TestClient(app, base_url=ORIGIN) as second:
+        other = login(second)
+        assert second.post('/api/account/password/change', headers=other, json={'verification_token': proof, 'new_password': NEXT_PASSWORD}).status_code == 401
+    assert client.post('/api/account/password/change', headers=headers, json={'verification_token': proof, 'new_password': NEXT_PASSWORD}).status_code == 200
+
+
+def test_password_proof_revoked_on_logout_and_verification_rate_limited(accounts):
+    store, app, client, admin, legacy = accounts
+    headers = login(client)
+    client.post('/api/account/password/verify', headers=headers, json={'current_password': PASSWORD})
+    assert client.post('/api/auth/logout', headers=headers).status_code == 200
+    assert not store.rows('SELECT * FROM password_change_intents')
+    headers = login(client)
+    results = [client.post('/api/account/password/verify', headers=headers, json={'current_password': 'incorrect synthetic password'}).status_code for _ in range(8)]
+    assert results[-1] == 429
+
+
+def test_public_branding_only_serves_named_small_regular_files(accounts):
+    import os
+    store, app, client, admin, legacy = accounts
+    directory = store.path.parent / 'site-assets'
+    directory.mkdir()
+    photo = directory / 'campus.jpg'
+    photo.write_bytes(b'\xff\xd8\xff\xd9')
+    (directory / 'private.json').write_text('synthetic private marker')
+    assert client.get('/site-assets/campus.jpg').status_code == 200
+    assert client.get('/site-assets/campus.jpg').headers['content-type'] == 'image/jpeg'
+    assert client.get('/site-assets/private.json').status_code == 404
+    assert client.get('/site-assets/lab-logo.png').status_code == 404
+    photo.write_bytes(b'x' * 2097153)
+    assert client.get('/site-assets/campus.jpg').status_code == 404
+    photo.unlink()
+    outside = store.path.parent / 'other-file'
+    outside.write_bytes(b'synthetic non-branding file')
+    os.link(outside, photo)
+    assert client.get('/site-assets/campus.jpg').status_code == 404
+
+
 @pytest.fixture
 def accounts(tmp_path):
     store = Store(tmp_path/'accounts.sqlite', seed_demo=False)
@@ -210,7 +287,7 @@ def test_navigation_covers_every_original_page_and_new_account_page(accounts):
     for role, pages in ROLE_PAGES.items():
         grouped = [page for group in navigation(role, pages) for page in group['pages']]
         assert len(grouped) == len(set(grouped))
-        assert set(grouped) == set(pages)-{'notifications'}
+        assert set(grouped) == set(pages)-({'notifications','guide','account'} if role=='caller' else {'notifications'})
     _, _, client, _, _ = accounts
     login(client)
     guide = client.get('/api/guide').json()

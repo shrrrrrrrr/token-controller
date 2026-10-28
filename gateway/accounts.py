@@ -27,16 +27,26 @@ class Login(Input):
 
 class Register(Login):
     display_name: str = Field(min_length=1, max_length=60, pattern=r'^[\w\-\u4e00-\u9fff ]+$')
+    invitation_code: SecretStr | None = Field(default=None, max_length=128)
 
 
 class ProfileChange(Input):
     current_password: SecretStr = Field(min_length=1, max_length=128)
     username: str = Field(min_length=3, max_length=40)
-    new_password: SecretStr | None = Field(default=None, min_length=15, max_length=128)
+    new_password: SecretStr | None = Field(default=None, min_length=6, max_length=128)
 
 
 class Claim(Login):
     code: SecretStr = Field(min_length=20, max_length=200)
+
+
+class PasswordVerify(Input):
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+
+class PasswordChange(Input):
+    verification_token: SecretStr = Field(min_length=32, max_length=128)
+    new_password: SecretStr = Field(min_length=6, max_length=128)
 
 
 class Approval(Input):
@@ -55,7 +65,7 @@ class PersonalKey(Input):
     budget: int = Field(default=-1, ge=-1, le=1000000000)
     rpm: int = Field(default=60, ge=1, le=60)
     tpm: int = Field(default=1000000, ge=100, le=1000000)
-    concurrency: int = Field(default=1, ge=1, le=1)
+    concurrency: int = Field(default=3, ge=1, le=3)
     days: int = Field(default=365, ge=1, le=365)
 
 
@@ -136,6 +146,7 @@ class WebAccounts:
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
             self.csrf(request, session)
         pending_path = request.url.path in ('/api/me', '/api/guide', '/api/guide/ack', '/api/guide/seen', '/api/account', '/api/account/profile', '/api/notifications', '/api/notifications/read-all') or (request.url.path.startswith('/api/notifications/') and request.url.path.endswith('/read'))
+        pending_path = pending_path or request.url.path in ('/api/account/password/verify', '/api/account/password/change')
         if pending and not pending_path:
             raise Fault('registration_pending', 403)
         if time.time()-session['last_seen'] >= 60:
@@ -198,19 +209,54 @@ def mount_accounts(app, store, web, registered_models):
         web.csrf(request, web.session(request))
         username = normalize_username(body.username)
         web.rate(request, 'register')
+        invitation = body.invitation_code.get_secret_value().strip() if body.invitation_code else ''
+        invitation_hash = digest(invitation) if invitation else None
+        if invitation_hash:
+            candidate = store.one('SELECT expires,used_at FROM invitation_codes WHERE token_hash=?', (invitation_hash,))
+            if not candidate or candidate['used_at'] is not None or candidate['expires'] <= time.time():
+                raise Fault('invalid_invitation_code', 400)
+        default_models = sorted({model['id'] for model in registered_models()}) if invitation_hash else []
         encoded = hash_password(body.password.get_secret_value(), username)
         with store.tx() as db:
             web.unique_username(db, username)
             now, user_id = time.time(), uid('usr_')
+            if invitation_hash:
+                candidate = db.execute('SELECT id FROM invitation_codes WHERE token_hash=? AND used_at IS NULL AND expires>?', (invitation_hash, now)).fetchone()
+                if not candidate:
+                    raise Fault('invalid_invitation_code', 400)
             # The public display name need not be globally unique; the stored
             # member name includes a random suffix to preserve existing users.
             name = body.display_name.strip()
             if db.execute('SELECT 1 FROM users WHERE name=?', (name,)).fetchone():
                 name += ' '+user_id[-6:]
-            db.execute("INSERT INTO users(id,name,role,models,profiles,budget,active) VALUES(?,?,'caller','[]','[]',-1,0)", (user_id, name))
-            db.execute("INSERT INTO login_accounts VALUES(?,?,?,'pending',?,?)", (user_id, username, encoded, now, now))
-            store.audit(db, user_id, 'account.register', user_id, {'approval_required': True})
-        return {'registered': True, 'status': 'pending'}
+            status = 'approved' if invitation_hash else 'pending'
+            db.execute("INSERT INTO users(id,name,role,models,profiles,budget,active) VALUES(?,?,'caller',?,'[]',-1,?)", (user_id, name, canonical(default_models), int(bool(invitation_hash))))
+            db.execute('INSERT INTO login_accounts VALUES(?,?,?,?,?,?)', (user_id, username, encoded, status, now, now))
+            if invitation_hash:
+                consumed = db.execute('UPDATE invitation_codes SET used_by=?,used_at=? WHERE token_hash=? AND used_at IS NULL AND expires>?', (user_id, now, invitation_hash, now)).rowcount
+                if consumed != 1:
+                    raise Fault('invalid_invitation_code', 400)
+                store.audit(db, user_id, 'account.invitation_redeemed', candidate['id'], {'default_permissions': True})
+            store.audit(db, user_id, 'account.register', user_id, {'approval_required': not bool(invitation_hash)})
+        return {'registered': True, 'status': status}
+
+    @app.get('/api/admin/invitations')
+    def invitations(who=Depends(admin)):
+        return store.rows('SELECT id,prefix,created,expires,used_at FROM invitation_codes ORDER BY created DESC LIMIT 100')
+
+    @app.post('/api/admin/invitations', status_code=201)
+    def create_invitation(body: Input, request: Request, who=Depends(admin)):
+        web.rate(request, 'invitation_create')
+        code, now = 'join_'+secrets.token_urlsafe(32), time.time()
+        invitation_id, expires = uid('inv_'), now+86400
+        with store.tx() as db:
+            store.check_admin(db, who)
+            active = db.execute('SELECT COUNT(*) FROM invitation_codes WHERE used_at IS NULL AND expires>?', (now,)).fetchone()[0]
+            if active >= 100:
+                raise Fault('invitation_limit', 429)
+            db.execute('INSERT INTO invitation_codes VALUES(?,?,?,?,?,?,NULL,NULL)', (invitation_id, digest(code), code[:13], who['user']['id'], now, expires))
+            store.audit(db, who['user']['id'], 'account.invitation_created', invitation_id, {'expires': expires, 'single_use': True})
+        return {'id': invitation_id, 'code': code, 'expires': expires, 'single_use': True}
 
     @app.post('/api/auth/login')
     def login(body: Login, request: Request):
@@ -245,6 +291,53 @@ def mount_accounts(app, store, web, registered_models):
     @app.get('/api/account')
     def profile(who=Depends(identity)):
         return {'username': who['account']['username'], 'status': who['account']['status'], 'user': who['user']}
+
+    def current_account(db, who, expected_hash):
+        now = time.time()
+        session = db.execute('SELECT * FROM web_sessions WHERE token_hash=? AND user_id=?', (who['session'], who['user']['id'])).fetchone()
+        account = db.execute('SELECT * FROM login_accounts WHERE user_id=?', (who['user']['id'],)).fetchone()
+        user = db.execute('SELECT active FROM users WHERE id=?', (who['user']['id'],)).fetchone()
+        if (not session or session['expires'] <= now or session['last_seen'] <= now-SESSION_IDLE
+                or not account or not hmac.compare_digest(account['password_hash'], expected_hash)
+                or not user or not user['active'] and account['status'] != 'pending'):
+            raise Fault('session_expired', 401)
+        return account
+
+    @app.post('/api/account/password/verify')
+    def verify_current_password(body: PasswordVerify, request: Request, who=Depends(identity)):
+        web.rate(request, 'password_verify', who['user']['id'])
+        account = store.one('SELECT * FROM login_accounts WHERE user_id=?', (who['user']['id'],))
+        if not verify_password(body.current_password.get_secret_value(), account['password_hash']):
+            raise Fault('invalid_login', 401)
+        token, expires = secrets.token_urlsafe(32), time.time()+300
+        with store.tx() as db:
+            current_account(db, who, account['password_hash'])
+            db.execute('DELETE FROM password_change_intents WHERE expires<=? OR session_hash=?', (time.time(), who['session']))
+            db.execute('INSERT INTO password_change_intents VALUES(?,?,?,?,?)',
+                       (digest(token), who['user']['id'], who['session'], account['password_hash'], expires))
+        return {'verified': True, 'verification_token': token, 'expires_in': 300}
+
+    @app.post('/api/account/password/change')
+    def change_password(body: PasswordChange, request: Request, who=Depends(identity)):
+        web.rate(request, 'password_change', who['user']['id'])
+        token_hash = digest(body.verification_token.get_secret_value())
+        intent = store.one('SELECT * FROM password_change_intents WHERE token_hash=? AND user_id=? AND session_hash=?',
+                           (token_hash, who['user']['id'], who['session']))
+        if not intent or intent['expires'] <= time.time():
+            raise Fault('password_verification_expired', 401)
+        account = store.one('SELECT * FROM login_accounts WHERE user_id=?', (who['user']['id'],))
+        encoded = hash_password(body.new_password.get_secret_value(), account['username'])
+        with store.tx() as db:
+            current_account(db, who, intent['account_hash'])
+            consumed = db.execute('DELETE FROM password_change_intents WHERE token_hash=? AND user_id=? AND session_hash=? AND expires>?',
+                                  (token_hash, who['user']['id'], who['session'], time.time())).rowcount
+            if consumed != 1:
+                raise Fault('password_verification_expired', 401)
+            db.execute('UPDATE login_accounts SET password_hash=?,changed=? WHERE user_id=?', (encoded, time.time(), who['user']['id']))
+            db.execute('DELETE FROM password_change_intents WHERE user_id=?', (who['user']['id'],))
+            db.execute('DELETE FROM web_sessions WHERE user_id=?', (who['user']['id'],))
+            store.audit(db, who['user']['id'], 'account.credentials_change', who['user']['id'], {'password_changed': True, 'sessions_revoked': True})
+        return web.issue_session(who['user']['id'], account_hash=encoded)
 
     @app.post('/api/account/profile')
     def change_profile(body: ProfileChange, request: Request, who=Depends(identity)):

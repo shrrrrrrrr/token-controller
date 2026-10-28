@@ -34,7 +34,7 @@ def test_catalog_registration_never_claims_readiness_and_reloads(tmp_path):
 def test_cloud_default_is_empty_and_explicit_failures_do_not_fallback(tmp_path):
     assert load_model_catalog(cloud_preview=True) == []
     demo = load_model_catalog()
-    assert {row["id"] for row in demo} == {"qwen3-32b", "h3"}
+    assert {row["id"] for row in demo} == {"glm5.3-flash", "qwen3.8-flash-next", "qwen3-32b", "h3"}
     assert all(row["status"] == "simulation" and not row["callable"] for row in demo)
     path = tmp_path / "missing.json"
     for cloud in (False, True):

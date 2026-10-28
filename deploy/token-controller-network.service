@@ -1,0 +1,31 @@
+[Unit]
+Description=Bounded campus network recovery using an approved helper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tc-netguard
+Group=tc-netguard
+UMask=0077
+StateDirectory=token-controller-network
+StateDirectoryMode=0700
+LoadCredential=campus-login:/etc/token-controller-network/campus-login.json
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/token-controller/network_guard.py /etc/token-controller-network/config.json /var/lib/token-controller-network ${CREDENTIALS_DIRECTORY}/campus-login
+TimeoutStartSec=110
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryMax=192M
+TasksMax=12
+CPUQuota=25%
+ReadWritePaths=/var/lib/token-controller-network

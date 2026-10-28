@@ -1,4 +1,6 @@
 import asyncio
+import stat
+from .branding import VENDORS
 import json
 import math
 import time
@@ -18,12 +20,17 @@ from .deployment import preview_blocked, validate_public_origin
 from .providers import DemoText, LiteLLMText, UnavailableText, verified_usage
 from .upstream import CloudText
 from .cloud_api import mount_cloud_api
+from .console import mount_console
+from .appearance import mount_appearance
+from .runtime_bridge import RuntimeBridge
 from .project_tools import configured_tools
 from .guide import account_guide, guide_target
 from .release import UI_VERSION
 from .scheduling import mount_scheduling, current_actor
 from .announcements import mount_announcements
 from .store import Fault, Store, canonical, uid
+from .protocols import Chat
+from .work_queue import WorkQueue, mount_work_queue
 
 STATIC = Path(__file__).parent / "static"
 MANAGERS = {"admin", "operator", "auditor"}
@@ -35,19 +42,6 @@ class Input(BaseModel):
 
 class GuideAck(Input):
     version: str = Field(min_length=1, max_length=30)
-
-
-class Message(Input):
-    role: Literal["system", "user", "assistant"]
-    content: str = Field(min_length=1, max_length=16000)
-
-
-class Chat(Input):
-    model: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
-    messages: list[Message] = Field(min_length=1, max_length=64)
-    max_tokens: int = Field(default=256, ge=16, le=4096)
-    temperature: float = Field(default=0.2, ge=0, le=2)
-    stream: bool = False
 
 
 class Video(Input):
@@ -162,7 +156,7 @@ class Service:
 
 
 def create_app(store=None, provider=None, control_url=None, control_token=None, control_transport=None, background=True, project_tools_path=None,
-               cloud_preview=False, public_origin=None, model_catalog_path=None, cloud_api=False, web_accounts=False):
+               cloud_preview=False, public_origin=None, model_catalog_path=None, cloud_api=False, web_accounts=False, runtime_client=None, model_requests_enabled=False, inference_slots=None, queue_wait=25):
     origin_host = None
     public_mode = cloud_preview or cloud_api
     if cloud_api:
@@ -171,6 +165,8 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         public_origin, origin_host = validate_public_origin(public_origin)
         background = False
     if cloud_preview:
+        if runtime_client is not None:
+            raise ValueError('cloud preview cannot attach a runtime agent')
         public_origin, origin_host = validate_public_origin(public_origin)
         if control_url or control_token or control_transport or (provider is not None and not isinstance(provider, UnavailableText)):
             raise ValueError("cloud preview cannot attach a provider or control agent")
@@ -197,12 +193,23 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @asynccontextmanager
     async def lifespan(app):
-        store.recover()
+        owns_queue=await work_queue.start() if not cloud_preview else False
+        if owns_queue or cloud_preview:store.recover()
         if cloud_api:
             try:
                 await provider.probe()
             except Fault:
                 pass  # UI remains available for credential provisioning and repair.
+
+        async def console_worker():
+            while True:
+                try:
+                    await console_control.tick()
+                except Exception:
+                    pass  # Persisted intent remains closed; no lifecycle POST replay.
+                await asyncio.sleep(1)
+
+        console_task=asyncio.create_task(console_worker()) if owns_queue and (runtime_client or console_control.simulation) else None
 
         async def worker():
             while True:
@@ -213,12 +220,18 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
                     pass
                 await asyncio.sleep(0.5)
 
-        task = asyncio.create_task(worker()) if background else None
+        task = asyncio.create_task(worker()) if background and owns_queue else None
         yield
+        if owns_queue:
+            await work_queue.close()
         if task:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        if console_task:
+            console_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await console_task
 
     app = FastAPI(title="项目组模型平台", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.service, app.state.store = service, store
@@ -239,7 +252,8 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
             if path == "/api/local/shutdown" or (path.startswith("/api/runtime") and request.method not in ("GET", "HEAD", "OPTIONS")):
                 return JSONResponse({"error": {"code": "cloud_runtime_control_disabled"}}, status_code=503)
             if (path == "/v1" or path.startswith("/v1/")) and (path, request.method) not in {
-                    ("/v1/models", "GET"), ("/v1/chat/completions", "POST")}:
+                    ("/v1/models", "GET"), ("/v1/chat/completions", "POST"), ("/v1/messages", "POST")} and not (
+                    path.startswith('/v1/jobs') and request.method in ('GET','POST') or path.startswith('/v1/calls/') and request.method=='GET'):
                 return JSONResponse({"error": {"code": "protocol_not_supported_in_cloud_pilot"}}, status_code=501)
         length = request.headers.get("content-length")
         if length and (not length.isdigit() or int(length) > 262144):
@@ -257,18 +271,25 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         response.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                                  "Referrer-Policy": "no-referrer",
                                  "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src "+frame_source+"; frame-ancestors 'none'; base-uri 'none'"})
+        if (request.url.path.startswith('/background-assets/') and response.status_code == 200
+                and response.headers.get('content-type') in ('image/jpeg', 'image/png')):
+            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
         return response
 
     @app.exception_handler(Fault)
     async def fault(request, exc):
-        return JSONResponse({"error": {"code": exc.code, "message": exc.code}}, status_code=exc.status)
+        headers={"Retry-After":"10"} if exc.status==429 else {}
+        if 'reconciliation' in exc.code or 'outcome_unknown' in exc.code:headers['X-Should-Retry']='false'
+        return JSONResponse({"error": {"code": exc.code, "message": exc.code}}, status_code=exc.status, headers=headers)
 
     @app.exception_handler(RequestValidationError)
     async def invalid(request, exc):
         # FastAPI's default validation body echoes submitted values, including credentials.
         return JSONResponse({"error": {"code": "invalid_request", "fields": [".".join(map(str, e["loc"])) for e in exc.errors()]}}, status_code=422)
 
-    def bearer_identity(authorization: str = Header(default="")):
+    def bearer_identity(request: Request, authorization: str = Header(default=""), x_api_key: str = Header(default="")):
+        if not authorization and request.url.path == "/v1/messages" and x_api_key:
+            authorization="Bearer "+x_api_key
         if not authorization.startswith("Bearer "):
             raise Fault("bearer_key_required", 401)
         if len(authorization) > 256:
@@ -292,8 +313,41 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
             return who
         return check
 
-    mount_scheduling(app,store,identity,registered_models)
+    console_control = RuntimeBridge(store, provider, client=runtime_client, simulation=not public_mode and provider.source == 'simulation')
+    mount_console(app, store, provider, identity, registered_models, public_mode=public_mode, controller=console_control)
+    mount_appearance(app, store, identity)
+    mount_scheduling(app,store,identity,registered_models,requests_enabled=model_requests_enabled)
     mount_announcements(app,store,identity)
+    async def resolve_work(model):
+        if console_control.active() or getattr(provider,'rotating',False):
+            raise Fault('model_not_ready_or_draining',503)
+        if cloud_preview:raise Fault('cloud_preview_execution_disabled',503)
+        if cloud_api:
+            if model!=provider.alias:raise Fault('model_not_ready_or_draining',503)
+            return {'profile':provider.profile,'profile_hash':provider.profile_hash,'runtime_required':False}
+        running=(await console_control.snapshot()).get('running_model') if console_control.simulation else 'qwen3-32b'
+        if model!=running:raise Fault('model_not_ready_or_draining',503)
+        if isinstance(provider,LiteLLMText) and (not provider.verified_at or time.time()-provider.verified_at>300):
+            raise Fault('qwen_probe_required_or_stale',503)
+        route=store.one('SELECT * FROM routes WHERE model=?',(model,))
+        profile=PROFILES[(route or {'profile':'qwen-tp2-v1'})['profile']]
+        return {'profile':profile['id'],'profile_hash':profile['hash'],'runtime_required':not console_control.simulation}
+
+    work_queue=WorkQueue(store,provider,resolve_work,registered_models,
+                         slots=inference_slots if inference_slots is not None else (3 if provider.source=='simulation' else 1),queue_wait=queue_wait)
+    app.state.work_queue=work_queue
+    if not cloud_preview:
+        mount_work_queue(app,work_queue,identity,bearer_identity)
+        from .anthropic_api import mount_messages
+        mount_messages(app,work_queue,bearer_identity)
+
+    @app.post('/v1/chat/completions')
+    async def work_chat(body:Chat,who=Depends(bearer_identity),idempotency_key:str=Header(default='',max_length=120),
+                        x_task_id:str|None=Header(default=None,max_length=100)):
+        if cloud_preview:raise Fault('cloud_preview_execution_disabled',503)
+        with store.connect() as db:work_queue.authorize(db,who,body.model,budget=False)
+        return await work_queue.chat(body,who,idempotency_key,x_task_id)
+
     if cloud_api:
         mount_cloud_api(app, store, provider, identity, registered_models, Chat, api_identity=bearer_identity)
 
@@ -312,9 +366,47 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     def script():
         return FileResponse(STATIC / "app.js", media_type="application/javascript")
 
+    @app.get('/console.js')
+    def console_script():
+        return FileResponse(STATIC / 'console.js', media_type='application/javascript')
+
+    @app.get('/console.css')
+    def console_styles():
+        return FileResponse(STATIC / 'console.css', media_type='text/css')
+
+    @app.get('/site-assets/{name}')
+    def site_asset(name: str):
+        # Operator-installed public branding only; never serve arbitrary state files.
+        media = {'campus.jpg': 'image/jpeg', 'lab-logo.png': 'image/png'}
+        directory = store.path.parent / 'site-assets'
+        if name not in media or directory.is_symlink():
+            raise Fault('asset_not_found', 404)
+        path = directory / name
+        try:
+            entry = path.lstat()
+            if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1 or entry.st_size > 2097152:
+                raise Fault('asset_not_found', 404)
+        except OSError:
+            raise Fault('asset_not_found', 404) from None
+        return FileResponse(path, media_type=media[name])
+
     @app.get('/accounts.js')
     def account_script():
         return FileResponse(STATIC / 'accounts.js', media_type='application/javascript')
+
+    @app.get('/jobs.js')
+    def jobs_script():
+        return FileResponse(STATIC / 'jobs.js', media_type='application/javascript')
+
+    @app.get('/appearance.js')
+    def appearance_script():
+        return FileResponse(STATIC / 'appearance.js', media_type='application/javascript')
+
+    @app.get('/model-logos/{vendor}.svg')
+    def vendor_logo(vendor: str):
+        if vendor not in VENDORS:
+            raise Fault('asset_not_found', 404)
+        return FileResponse(STATIC / 'model-logos' / (vendor+'.svg'), media_type='image/svg+xml')
 
     @app.get('/messages.js')
     def messages_script():
@@ -342,7 +434,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "mode": "cloud-api" if cloud_api else "cloud-preview" if cloud_preview else "local-mvp", "text_source": provider.source, "runtime_source": "disabled" if public_mode else "simulation", **({"web_accounts": True} if web_accounts else {})}
+        return {"status": "ok", "mode": "cloud-api" if cloud_api else "cloud-preview" if cloud_preview else "local-mvp", "text_source": provider.source, "runtime_source": "agent" if runtime_client else "disabled" if public_mode else "simulation", **({"web_accounts": True} if web_accounts else {})}
 
     @app.get("/api/me")
     def me(who=Depends(identity)):
@@ -352,7 +444,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
                 "auth_mode": "password_session" if web_accounts else "legacy_key",
                 "account": who.get("account"),
                 "mode": "cloud-api" if cloud_api else "cloud-preview" if cloud_preview else "local-mvp", "enabled_roles": ["admin", "caller"],
-                "capabilities": {"inference": bool(user['active']) and not cloud_preview and (not cloud_api or user["role"] == "caller"), "runtime_control": False}}
+                "capabilities": {"inference": bool(user['active']) and not cloud_preview and (not cloud_api or user["role"] == "caller"), "runtime_control": bool(runtime_client) and user['role']=='admin'}}
 
     @app.get("/api/model-catalog")
     async def model_catalog(who=Depends(identity)):
@@ -370,6 +462,11 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
                     item.update(status=status, health="verified" if provider.ready else "unverified",
                                 callable=provider.ready and item["authorized"] and who["user"]["role"] == "caller",
                                 source="live_api_probe" if provider.ready else "private_configuration_not_live")
+        if hasattr(app.state,'console_shelf'):
+            observed={m['id']:m for m in (await app.state.console_shelf(who))['models']}
+            for item in models:
+                if item['id'] in observed:
+                    item.update(running=observed[item['id']]['running'],status_label=observed[item['id']]['status_label'],resident=observed[item['id']]['resident'])
         return {"models": models,
                 "source": "private_configuration" if model_catalog_path or cloud_preview else "synthetic_example_only",
                 "runtime_source": "disabled" if public_mode else "simulation"}
@@ -473,47 +570,11 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         except (httpx.HTTPError, ValueError):
             raise Fault("qwen_probe_failed", 503) from None
 
-    @app.post("/v1/chat/completions")
-    async def chat(body: Chat, who=Depends(bearer_identity), idempotency_key: str = Header(default="", max_length=120)):
-        allowed = set(json.loads(who["user"]["models"])) & set(json.loads(who["key"]["models"]))
-        if body.model not in allowed or who["user"]["role"] == "auditor":
-            raise Fault("model_forbidden", 403)
-        if body.model != "qwen3-32b" or body.model not in {m["id"] for m in registered_models()}:
-            raise Fault("model_not_ready_or_draining", 503)
-        if body.stream:
-            raise Fault("streaming_not_supported_in_mvp", 501)
-        data = body.model_dump()
-        if isinstance(provider, LiteLLMText) and (not provider.verified_at or time.time()-provider.verified_at > 300):
-            raise Fault("qwen_probe_required_or_stale", 503)
-        route = store.one("SELECT * FROM routes WHERE model=?", (body.model,))
-        profile = PROFILES[route["profile"]]
-        points = sum(len(m.content.encode("utf-8"))+256 for m in body.messages)+body.max_tokens+512
-        req, fresh = store.reserve(who, idempotency_key or uid("auto_"), data, "chat", body.model, points, profile["id"], profile["hash"], source=provider.source)
-        if not fresh:
-            if req["status"] == "succeeded" and req["response"]:
-                return JSONResponse(json.loads(req["response"]), headers={"X-Request-ID": req["id"], "X-Idempotent-Replay": "true"})
-            raise Fault("request_"+req["status"], 409)
-        store.mark_dispatched(req["id"])
-        try:
-            result = await provider.complete(data)
-            input_tokens, output_tokens, total = verified_usage(result)
-            result["gateway"] = dict(request_id=req["id"], source=provider.source, profile_hash=profile["hash"])
-            if not store.settle(req["id"], total, input_tokens, output_tokens, result):
-                raise Fault("usage_exceeds_reservation_reconciliation", 502)
-            return JSONResponse(result, headers={"X-Request-ID": req["id"]})
-        except BaseException as exc:
-            store.unknown(req["id"], exc.code if isinstance(exc, Fault) else "upstream_outcome_unknown")
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            code = exc.code if isinstance(exc, Fault) else "upstream_outcome_unknown_reconciliation"
-            return JSONResponse({"error": {"code": code}, "request_id": req["id"]}, status_code=502,
-                                headers={"X-Request-ID": req["id"]})
-
     @app.post("/v1/videos", status_code=202)
     def video(body: Video, who=Depends(bearer_identity), idempotency_key: str = Header(default="", max_length=120)):
         route = store.one("SELECT * FROM routes WHERE model='h3'")
         profile = PROFILES[route["profile"]]
-        req, fresh = store.reserve(who, idempotency_key or uid("auto_"), body.model_dump(), "video", "h3",
+        req, fresh = store.admit(who, idempotency_key or uid("auto_"), body.model_dump(), "video", "h3",
                                    body.duration_seconds*100, profile["id"], profile["hash"])
         task = store.one("SELECT id,status,source,created FROM tasks WHERE request_id=?", (req["id"],))
         return {**task, "request_id": req["id"], "replay": not fresh, "notice": "模拟队列；真实H3适配未启用"}
@@ -569,8 +630,8 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     @app.get("/api/users")
     def users(who=Depends(roles(*MANAGERS))):
         if web_accounts:
-            return store.rows("SELECT u.*,a.username AS login_username,a.status AS registration_status FROM users u LEFT JOIN login_accounts a ON a.user_id=u.id ORDER BY u.name")
-        return store.rows("SELECT * FROM users ORDER BY name")
+            return store.rows("SELECT u.*,a.username AS login_username,a.status AS registration_status FROM users u LEFT JOIN login_accounts a ON a.user_id=u.id WHERE NOT EXISTS (SELECT 1 FROM archived_accounts x WHERE x.user_id=u.id) ORDER BY u.name")
+        return store.rows("SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM archived_accounts x WHERE x.user_id=users.id) ORDER BY name")
 
     @app.post("/api/users", status_code=201)
     def add_user(body: UserInput, who=Depends(roles("admin"))):
@@ -619,7 +680,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.get("/api/keys")
     def keys(who=Depends(roles("admin"))):
-        return store.rows("SELECT id,user_id,prefix,models,budget,spent,reserved,rpm,tpm,concurrency,expires,revoked FROM keys ORDER BY expires DESC LIMIT 200")
+        return store.rows("SELECT id,user_id,prefix,models,budget,spent,reserved,rpm,tpm,concurrency,expires,revoked FROM keys WHERE NOT EXISTS (SELECT 1 FROM archived_accounts x WHERE x.user_id=keys.user_id) ORDER BY expires DESC LIMIT 200")
 
     @app.post("/api/keys", status_code=201)
     def add_key(body: KeyInput, who=Depends(roles("admin"))):

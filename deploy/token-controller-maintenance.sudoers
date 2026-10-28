@@ -1,0 +1,3 @@
+# Install only after reviewing root-owned wrapper, config and service units.
+# This grants no shell, Docker, arbitrary service or file-write permission.
+tc-maint ALL=(root) NOPASSWD: /usr/local/sbin/tc-maintenance status, /usr/local/sbin/tc-maintenance network-check, /usr/local/sbin/tc-maintenance tunnel-reconnect

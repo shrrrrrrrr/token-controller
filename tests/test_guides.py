@@ -81,5 +81,5 @@ def test_cloud_guide_explains_disabled_inference_without_claiming_simulation(gui
     assert '推理与运行控制均关闭' in guide['boundary']
     assert 'scope 分离' in guide['boundary']
     assert all(step['target'] in guide['allowed_pages'] for step in guide['steps'])
-    assert any('待部署' in step['text'] for step in guide['steps'])
+    assert any('暂未运行' in step['text'] for step in guide['steps'])
     assert not any('当前默认是模拟文本' in step['text'] for step in guide['steps'])

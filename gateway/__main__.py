@@ -23,11 +23,24 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--qwen", action="store_true", help="显式启用QWEN_API_BASE；不会启停服务器")
     parser.add_argument("--cloud-preview", action="store_true", help="受限云预发布：禁用所有推理和模拟控制")
-    parser.add_argument("--cloud-api", action="store_true", help="受限云端文本试运行；禁用运行控制和视频")
+    parser.add_argument("--cloud-api", action="store_true", help="云端文本服务；运行控制仅可显式连接独立代理，视频调用关闭")
     parser.add_argument("--web-accounts", action="store_true", help="显式启用账密登录、审批和成员自管 Key；先通过本地工具初始化管理员")
     parser.add_argument("--upstream-config", type=Path, help="运营者维护的固定 loopback 模型配置，不含 Key")
+    parser.add_argument("--runtime-agent-config",type=Path,help="独立运行代理的私有连接配置，仅用于cloud-api")
     parser.add_argument("--public-origin", help="预发布站点的唯一 HTTPS origin")
+    parser.add_argument('--inference-slots',type=int,choices=(1,2,3),default=None,
+                        help='已验收的同时推理数；真实服务默认1，本地模拟默认3，工作流上限固定3')
     args = parser.parse_args()
+    runtime_client=None
+    if args.runtime_agent_config:
+        if not args.cloud_api:
+            raise SystemExit('--runtime-agent-config requires --cloud-api')
+        from .runtime_agent import private_json
+        from .runtime_bridge import AgentClient
+        connection=private_json(args.runtime_agent_config)
+        if set(connection)!={'url','token'}:
+            raise SystemExit('Invalid runtime-agent connection fields')
+        runtime_client=AgentClient(connection['url'],connection['token'])
     if args.web_accounts and args.command != 'serve':
         raise SystemExit('--web-accounts 只用于 serve；管理员初始化请使用 tools/manage_web_accounts.py。')
     args.state = args.state.resolve()
@@ -146,10 +159,11 @@ def main():
             else:
                 provider = None
             app = create_app(store, provider=provider, cloud_preview=args.cloud_preview, cloud_api=args.cloud_api, public_origin=args.public_origin,
+                             runtime_client=runtime_client,inference_slots=args.inference_slots,
                              web_accounts=args.web_accounts,
                              model_catalog_path=catalog_path,
                              project_tools_path=args.state / "project-tools.local.json")
-            print(f"Cloud mode: {'text pilot' if args.cloud_api else 'preview'} | loopback:{args.port} | runtime control disabled", flush=True)
+            print(f"Cloud mode: {'text pilot' if args.cloud_api else 'preview'} | loopback:{args.port} | runtime={'agent configured' if runtime_client else 'disabled'}", flush=True)
             # Only the local reverse proxy is trusted. The port never binds publicly.
             uvicorn.run(app, host="127.0.0.1", port=args.port, workers=1, access_log=False,
                         proxy_headers=True, forwarded_allow_ips="127.0.0.1", limit_concurrency=64,
@@ -191,7 +205,7 @@ def main():
             time.sleep(0.1)
         else:
             raise SystemExit("模拟控制代理健康检查超时")
-        app = create_app(store, provider, f"http://127.0.0.1:{agent_port}", token, web_accounts=args.web_accounts)
+        app = create_app(store, provider, f"http://127.0.0.1:{agent_port}", token, web_accounts=args.web_accounts,inference_slots=args.inference_slots)
         print(f"Local: http://127.0.0.1:{args.port}  | runtime=SIMULATION | text={provider.source}", flush=True)
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=args.port, workers=1, access_log=False))
         app.state.shutdown = lambda: setattr(server, "should_exit", True)

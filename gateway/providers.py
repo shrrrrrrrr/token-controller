@@ -18,9 +18,21 @@ class DemoText:
 
     async def complete(self, body):
         await asyncio.sleep(0.05)
+        if body.get('tools') and body['messages'][-1]['role']!='tool' and body.get('tool_choice')!='none':
+            tool=body['tools'][0]['function']
+            return dict(id='chatcmpl-local-demo',object='chat.completion',created=int(time.time()),model=body['model'],
+                choices=[dict(index=0,message={'role':'assistant','content':None,'tool_calls':[{'id':'call_simulated',
+                    'type':'function','function':{'name':tool['name'],'arguments':'{}'}}]},finish_reason='tool_calls')],
+                usage=dict(prompt_tokens=12,completion_tokens=8,total_tokens=20))
         return dict(id="chatcmpl-local-demo", object="chat.completion", created=int(time.time()),
-                    model="qwen3-32b", choices=[dict(index=0, message=dict(role="assistant", content="本地网关闭环已贯通。这是模拟回答，未调用Qwen或GPU。"), finish_reason="stop")],
+                    model=body["model"], choices=[dict(index=0, message=dict(role="assistant", content="本地模拟回复，未调用模型服务器"), finish_reason="stop")],
                     usage=dict(prompt_tokens=12, completion_tokens=8, total_tokens=20))
+
+    async def stream(self,body):
+        from .protocols import completion_chunks
+        for chunk in completion_chunks(await self.complete(body)):
+            await asyncio.sleep(0.02)
+            yield chunk
 
 
 class LiteLLMText:
@@ -62,8 +74,16 @@ class LiteLLMText:
             model="openai/qwen3-32b", api_base=self.base, api_key=self.api_key or "local-no-auth",
             messages=body["messages"], max_tokens=body["max_tokens"],
             temperature=body["temperature"], stream=False, timeout=90, num_retries=0,
+            **{k:v for k,v in body.items() if k in ('tools','tool_choice','parallel_tool_calls','top_p','stop','reasoning_effort')},
         )
         return result.model_dump(mode="json")
+
+    async def stream(self,body):
+        from .upstream import CloudText
+        # Reuse the bounded SSE parser; the configured endpoint remains fixed.
+        transport=CloudText({'alias':'qwen3-32b','served_model':'qwen3-32b','base_url':self.base},'.')
+        transport.secret=lambda:self.api_key or 'local-no-auth'
+        async for chunk in transport.stream(body):yield chunk
 
 
 def verified_usage(response):

@@ -81,7 +81,7 @@ def test_qwen_demo_usage_and_idempotency(system):
     assert second.status_code == 200
     assert second.headers["X-Idempotent-Replay"] == "true"
     assert first.json() == second.json()
-    assert len(s.rows("SELECT * FROM ledger WHERE request_id=?", (req_id,))) == 3
+    assert len(s.rows("SELECT * FROM ledger WHERE request_id=?", (req_id,))) == 1
     user = s.one("SELECT * FROM users WHERE id=?", (system["ids"]["caller"],))
     assert user["spent"] == 20 and user["reserved"] == 0
     changed = dict(CHAT, max_tokens=64)
@@ -104,12 +104,12 @@ def test_atomic_shared_user_quota_across_keys(tmp_path):
     assert s.one("SELECT * FROM users WHERE id=?", (user_id,))["reserved"] == 1000
 
 
-def test_rate_limits_and_stream_rejected_before_reservation(system):
+def test_rate_limits_and_streaming_without_quota_freeze(system):
     s, c = system["store"], system["client"]
-    assert c.post("/v1/chat/completions", json=dict(CHAT, stream=True), headers=auth(system, "caller")).status_code == 501
-    assert not s.rows("SELECT * FROM requests")
+    assert c.post("/v1/chat/completions", json=dict(CHAT, stream=True), headers=auth(system, "caller")).status_code == 200
+    assert s.one("SELECT SUM(reserved) n FROM users")["n"]==0
     with s.tx() as db:
-        db.execute("UPDATE keys SET rpm=1 WHERE id=?", (system["credentials"]["caller"]["id"],))
+        db.execute("UPDATE keys SET rpm=2 WHERE id=?", (system["credentials"]["caller"]["id"],))
     assert c.post("/v1/chat/completions", json=CHAT, headers=auth(system, "caller")).status_code == 200
     assert c.post("/v1/chat/completions", json=CHAT, headers=auth(system, "caller")).status_code == 429
 
@@ -126,15 +126,14 @@ def test_unknown_usage_freezes_and_reconciles(system, failure):
             vals = {"excess": (100000, 1, 100001), "negative": (-1, 1, 0), "bool": (True, 1, 2)}[failure]
             return {"usage": dict(zip(["prompt_tokens", "completion_tokens", "total_tokens"], vals))}
     system["app"].state.service.provider = Broken()
-    # create_app closures hold provider; install a separate app using the broken provider.
-    app = create_app(system["store"], Broken(), background=False)
-    with TestClient(app) as c:
-        response = c.post("/v1/chat/completions", json=CHAT, headers=auth(system, "caller", "unknown"))
+    # The persistent dispatcher owns this state directory; do not run a second worker.
+    system["app"].state.work_queue.provider=Broken()
+    response=system['client'].post('/v1/chat/completions',json=CHAT,headers=auth(system,'caller','unknown'))
     assert response.status_code == 502 and "secret-upstream" not in response.text
     req = system["store"].request(response.json()["request_id"])
     assert req["status"] == "reconciliation" and req["actual"] is None
     key = system["store"].one("SELECT * FROM keys WHERE id=?", (system["credentials"]["caller"]["id"],))
-    assert key["reserved"] > 0 and key["spent"] == 0
+    assert key["reserved"] == 0 and key["spent"] == 0
     reconciliation = dict(outcome="not_executed", evidence="已从上游只读记录确认没有执行该请求")
     assert system["client"].post("/api/requests/"+req["id"]+"/reconcile", json=reconciliation, headers=auth(system, "operator")).status_code == 403
     assert system["client"].post("/api/requests/"+req["id"]+"/reconcile", json=reconciliation, headers=auth(system)).status_code == 200

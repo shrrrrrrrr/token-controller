@@ -22,7 +22,7 @@ test('real accounts: register, approve, login, self-managed Key, usage and group
    child.once('exit',code=>{clearTimeout(timer);reject(new Error('Fixture exit '+code+': '+stderr))});
    child.stdout.on('data',data=>{output+=data;const line=output.split('\n')[0];try{const parsed=JSON.parse(line);clearTimeout(timer);resolve(parsed.port)}catch{/* Await full line. */}});
   });
-  browser=await chromium.launch({headless:true});
+  browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EXECUTABLE_PATH?{executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH}:{})});
   const adminContext=await browser.newContext({viewport:{width:1440,height:1000}});
   const memberContext=await browser.newContext({viewport:{width:1440,height:1000}});
   const admin=await adminContext.newPage(),member=await memberContext.newPage();
@@ -38,7 +38,9 @@ test('real accounts: register, approve, login, self-managed Key, usage and group
    if(first){await page.locator('#message-later').waitFor();await page.locator('#message-later').click()}
   };
   const go=async(page,id)=>{
-   const button=page.locator('#nav [data-page="'+id+'"]');
+   if(id==='account'&&!await page.locator('#nav [data-page="account"]').count()){await page.locator('#identity').click();await page.locator('#account-profile').click();await page.locator('#main[data-page="account"]').waitFor();return}
+   let button=page.locator('#nav [data-page="'+id+'"]');
+   if(!await button.count()){await go(page,{usage:'quota',connect:'mykeys',queue:'play'}[id]);await page.locator('#main [data-go="'+id+'"]').click();await page.locator('#main[data-page="'+id+'"]').waitFor();return}
    if(!await button.isVisible())await button.locator('xpath=ancestor::details[1]').locator('summary').click();
    await button.click();await page.locator('#main[data-page="'+id+'"]').waitFor();
   };
@@ -47,14 +49,14 @@ test('real accounts: register, approve, login, self-managed Key, usage and group
   await member.locator('#auth-display').fill('合成成员');await member.locator('#auth-username').fill('fixture-member');
   await member.locator('#auth-password').fill(password);await member.locator('#auth-confirm').fill(password);
   await member.locator('#account-auth-form button[type="submit"]').click();
-  await member.getByText('注册成功。现在可以登录查看审批状态，管理员批准后可创建调用 Key。',{exact:true}).waitFor();
+  await member.getByText('注册成功，请登录查看审批状态',{exact:true}).waitFor();
   await signIn(member,'fixture-member');await go(member,'account');
   assert.equal(await member.locator('#nav [data-page="mykeys"]').count(),0);
   await admin.goto(base);await signIn(admin,'fixture-admin');
   assert.equal(await admin.locator('#nav > details, #nav > button').count(),6);
   await go(admin,'registrations');await admin.getByRole('tab',{name:'批准并分配权限',exact:true}).click();
   assert.equal(await admin.locator('#approval-unlimited').isChecked(),true);
-  assert.equal(await admin.locator('#approval-models input:checked').count(),2);
+  assert.equal(await admin.locator('#approval-models input:checked').count(),4);
   await admin.locator('#registration-approve-form button[type="submit"]').click();
   await admin.getByText('账号已批准',{exact:true}).waitFor();
   await member.reload();await member.locator('#nav [data-page="mykeys"]').waitFor({state:'attached'});
@@ -68,9 +70,10 @@ test('real accounts: register, approve, login, self-managed Key, usage and group
   await member.locator('#personal-key-save').click();await member.locator('#personal-key-result code').waitFor();
   const key=await member.locator('#personal-key-result code').textContent();assert.ok(key.length>20);
   await go(member,'play');
-  assert.equal(await member.locator('#play-key').inputValue(),key);
-  await member.locator('#chat-prompt').fill('合成浏览器测试');await member.locator('#chat-form button[type="submit"]').click();
-  await member.locator('#chat-result').filter({hasText:'输入'}).waitFor();
+  await member.getByRole('tab',{name:'调用测试',exact:true}).click();
+  assert.equal(await member.locator('#console-call-key').inputValue(),key);
+  await member.locator('#test-prompt').fill('合成浏览器测试');await member.locator('#console-chat button[type="submit"]').click();
+  await member.locator('#console-chat-result').filter({hasText:'Token'}).waitFor();
   await go(member,'usage');await member.locator('table tbody tr').first().waitFor();
   await go(member,'mykeys');assert.equal(await member.locator('#personal-key-result code').count(),0);
   await member.getByRole('tab',{name:'我的 Key',exact:true}).click();
@@ -86,7 +89,7 @@ test('real accounts: register, approve, login, self-managed Key, usage and group
   await member.setViewportSize({width:1440,height:1000});await go(member,'mykeys');
   await member.getByRole('tab',{name:'我的 Key',exact:true}).click();await member.locator('[data-self-revoke]').first().click();
   await member.getByText('Key 已吊销，网页账号继续可用',{exact:true}).waitFor();
-  await member.locator('#logout').click();await member.locator('#account-auth-form').waitFor();
+  await member.locator('#identity').click();await member.locator('#logout').click();await member.locator('#account-auth-form').waitFor();
   assert.equal(await member.evaluate(()=>Object.keys(localStorage).length),0);
   // The same real backend also exercises publishing and next-login priority.
   await go(admin,'announcements');await admin.getByRole('tab',{name:'编辑与发布',exact:true}).click();
@@ -98,7 +101,7 @@ test('real accounts: register, approve, login, self-managed Key, usage and group
   await fresh.goto(base);await fresh.locator('[data-auth-view="register"]').click();
   await fresh.locator('#auth-display').fill('新公告成员');await fresh.locator('#auth-username').fill('fresh-notices');
   await fresh.locator('#auth-password').fill(password);await fresh.locator('#auth-confirm').fill(password);
-  await fresh.locator('#account-auth-form button[type="submit"]').click();await fresh.getByText('注册成功。现在可以登录查看审批状态，管理员批准后可创建调用 Key。',{exact:true}).waitFor();
+  await fresh.locator('#account-auth-form button[type="submit"]').click();await fresh.getByText('注册成功，请登录查看审批状态',{exact:true}).waitFor();
   await go(admin,'registrations');await admin.getByRole('tab',{name:'批准并分配权限',exact:true}).click();
   await admin.locator('#registration-approve-form button[type="submit"]').click();await admin.getByText('账号已批准',{exact:true}).waitFor();
   await signIn(fresh,'fresh-notices',false);await fresh.locator('#login-dialog-title').filter({hasText:title}).waitFor();
@@ -118,12 +121,12 @@ test('real accounts: register, approve, login, self-managed Key, usage and group
    if(process.env.BROWSER_SCREENSHOT_DIR)await member.screenshot({path:path.join(process.env.BROWSER_SCREENSHOT_DIR,`announcement-${viewport.width}.png`),fullPage:true});
   }
   await member.setViewportSize({width:1440,height:1000});
-  await member.locator('#message-later').click();await member.locator('#logout').click();await member.locator('#account-auth-form').waitFor();
+  await member.locator('#message-later').click();await member.locator('#identity').click();await member.locator('#logout').click();await member.locator('#account-auth-form').waitFor();
   await signIn(member,'fixture-member',false);await member.locator('#login-dialog-title').filter({hasText:title}).waitFor();
   await member.locator('#message-read').click();await member.locator('#login-dialog').waitFor({state:'detached'});
   await member.locator('#open-notifications').click();await member.locator('#main[data-page="notifications"]').waitFor();
   await member.locator('tr').filter({hasText:title}).getByText('已读',{exact:true}).waitFor();
-  await member.locator('#logout').click();await member.locator('#account-auth-form').waitFor();await signIn(member,'fixture-member',false);
+  await member.locator('#identity').click();await member.locator('#logout').click();await member.locator('#account-auth-form').waitFor();await signIn(member,'fixture-member',false);
   await member.waitForTimeout(200);assert.equal(await member.locator('#login-dialog').count(),0,'Guide and read notices must not reappear');
   await go(admin,'announcements');await admin.getByRole('tab',{name:'公告列表',exact:true}).click();await admin.locator('[data-ann-edit]').first().click();
   await admin.locator('#announcement-title').fill(title+'更新');await admin.locator('#announcement-body').fill('Synthetic revised publication');

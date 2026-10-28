@@ -16,7 +16,7 @@ def scheduling(tmp_path):
         users[role]=store.create_user(role,'caller' if role=='other' else role,['qwen3-32b'],[],10000)
         credential=store.issue_key(users[role],['qwen3-32b'],10000)
         headers[role]={'Authorization':'Bearer '+credential['key']}
-    with TestClient(create_app(store,background=False)) as client:
+    with TestClient(create_app(store,background=False,model_requests_enabled=True)) as client:
         yield store,users,headers,client
 
 

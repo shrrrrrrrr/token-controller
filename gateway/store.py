@@ -100,6 +100,11 @@ CREATE TABLE IF NOT EXISTS notifications (
  id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL,
  body TEXT NOT NULL, reference TEXT NOT NULL, created REAL NOT NULL, read_at REAL);
 CREATE INDEX IF NOT EXISTS notifications_owner ON notifications(user_id,created);
+CREATE TABLE IF NOT EXISTS archived_accounts (user_id TEXT PRIMARY KEY REFERENCES users(id),archived REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS site_appearance (
+ id INTEGER PRIMARY KEY CHECK(id=1), background_id TEXT, revision INTEGER NOT NULL DEFAULT 0,
+ updated REAL NOT NULL DEFAULT 0, updated_by TEXT REFERENCES users(id));
+INSERT OR IGNORE INTO site_appearance(id) VALUES(1);
 CREATE TABLE IF NOT EXISTS login_accounts (
  user_id TEXT PRIMARY KEY REFERENCES users(id), username TEXT NOT NULL UNIQUE,
  password_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','approved')),
@@ -108,10 +113,18 @@ CREATE TABLE IF NOT EXISTS web_sessions (
  token_hash TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), csrf TEXT NOT NULL,
  created REAL NOT NULL, last_seen REAL NOT NULL, expires REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS web_sessions_owner ON web_sessions(user_id);
+CREATE TABLE IF NOT EXISTS password_change_intents (
+ token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ session_hash TEXT NOT NULL UNIQUE REFERENCES web_sessions(token_hash) ON DELETE CASCADE,
+ account_hash TEXT NOT NULL, expires REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS account_tokens (
  token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
  purpose TEXT NOT NULL CHECK(purpose IN ('enroll','reset')), expires REAL NOT NULL,
  consumed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS invitation_codes (
+ id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL,
+ created_by TEXT NOT NULL REFERENCES users(id), created REAL NOT NULL, expires REAL NOT NULL,
+ used_by TEXT REFERENCES users(id), used_at REAL);
 CREATE TABLE IF NOT EXISTS key_labels (
  key_id TEXT PRIMARY KEY REFERENCES keys(id), name TEXT NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_rate (
@@ -140,6 +153,10 @@ class Store:
             db.executescript(SCHEMA)
             if "source" not in [r[1] for r in db.execute("PRAGMA table_info(requests)")]:
                 db.execute("ALTER TABLE requests ADD COLUMN source TEXT NOT NULL DEFAULT 'simulation'")
+            if "metering" not in [r[1] for r in db.execute("PRAGMA table_info(requests)")]:
+                db.execute("ALTER TABLE requests ADD COLUMN metering TEXT NOT NULL DEFAULT 'reserved'")
+            if "estimated_tokens" not in [r[1] for r in db.execute("PRAGMA table_info(requests)")]:
+                db.execute("ALTER TABLE requests ADD COLUMN estimated_tokens INTEGER NOT NULL DEFAULT 0")
             db.execute("PRAGMA journal_mode=WAL")
             if seed_demo:
                 for profile in ("qwen-tp2-v1", "h3-single-v1", "h3-sp2-v1"):
@@ -224,7 +241,7 @@ class Store:
         return dict(user=user, key=key)
 
     def reserve(self, identity, idem, body, kind, model, points, profile, profile_hash, max_queue=30, source="simulation",
-                runtime_required=True, global_concurrency=None, required_role=None):
+                runtime_required=True, global_concurrency=None, required_role=None, reserve_quota=True):
         user_id, key_id = identity["user"]["id"], identity["key"]["id"]
         body_hash = digest(canonical(dict(body=body, source=source)))
         now = time.time()
@@ -254,11 +271,12 @@ class Store:
             recent = db.execute("SELECT COUNT(*),COALESCE(SUM(reserved),0) FROM requests WHERE key_id=? AND created>?",
                                 (key_id, now-60)).fetchone()
             active = db.execute("SELECT COUNT(*) FROM requests WHERE key_id=? AND status IN ('reserved','dispatched','reconciliation')", (key_id,)).fetchone()[0]
-            text_reserved = db.execute("SELECT COALESCE(SUM(reserved),0) FROM requests WHERE key_id=? AND kind='chat' AND created>?", (key_id, now-60)).fetchone()[0]
+            text_reserved = db.execute("SELECT COALESCE(SUM(CASE WHEN metering='actual' THEN COALESCE(actual,estimated_tokens) ELSE reserved END),0) FROM requests WHERE key_id=? AND kind='chat' AND created>?", (key_id, now-60)).fetchone()[0]
             if recent[0] >= key["rpm"] or (kind == "chat" and text_reserved+points > key["tpm"]) or active >= key["concurrency"]:
                 raise Fault("rate_or_concurrency_limit", 429)
             # -1 explicitly disables the cumulative limit, not usage accounting.
-            if any(row["budget"] >= 0 and row["spent"]+row["reserved"]+points > row["budget"] for row in (user, key)):
+            if any(row["budget"] >= 0 and (row["spent"]+row["reserved"]+points > row["budget"] if reserve_quota
+                   else row["spent"]+row["reserved"] >= row["budget"]) for row in (user, key)):
                 raise Fault("insufficient_quota", 402)
             if kind == "video":
                 total = db.execute("SELECT COUNT(*) FROM tasks WHERE status IN ('queued','running','reconciliation')").fetchone()[0]
@@ -267,15 +285,25 @@ class Store:
                     raise Fault("video_queue_full", 429)
             request_id = uid("req_")
             db.execute("INSERT INTO requests(id,key_id,user_id,idem,body_hash,kind,model,profile,profile_hash,status,reserved,created) VALUES(?,?,?,?,?,?,?,?,?,'reserved',?,?)",
-                       (request_id, key_id, user_id, idem, body_hash, kind, model, profile, profile_hash, points, now))
-            db.execute("UPDATE requests SET source=? WHERE id=?", (source, request_id))
-            for table, row_id in [("users", user_id), ("keys", key_id)]:
-                db.execute(f"UPDATE {table} SET reserved=reserved+? WHERE id=?", (points, row_id))
-            db.execute("INSERT INTO ledger(request_id,event,points,created) VALUES(?,'reserve',?,?)", (request_id, points, now))
+                       (request_id, key_id, user_id, idem, body_hash, kind, model, profile, profile_hash, points if reserve_quota else 0, now))
+            db.execute("UPDATE requests SET source=?,metering=? WHERE id=?", (source, 'reserved' if reserve_quota else 'actual', request_id))
+            db.execute('UPDATE requests SET estimated_tokens=? WHERE id=?',(points,request_id))
+            if reserve_quota:
+                for table, row_id in [("users", user_id), ("keys", key_id)]:
+                    db.execute(f"UPDATE {table} SET reserved=reserved+? WHERE id=?", (points, row_id))
+                db.execute("INSERT INTO ledger(request_id,event,points,created) VALUES(?,'reserve',?,?)", (request_id, points, now))
             if kind == "video":
                 db.execute("INSERT INTO tasks(id,request_id,user_id,key_id,body,status,created,source) VALUES(?,?,?,?,?,'queued',?,'simulation')",
                            (uid("job_"), request_id, user_id, key_id, canonical(body), now))
             return dict(db.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()), True
+
+    def admit(self, *args, **kwargs):
+        """Register an idempotent request without freezing any cumulative quota.
+
+        Historical reserved requests retain their original reconciliation rules.
+        Request-size estimates remain admission/rate guards, never a debit.
+        """
+        return self.reserve(*args, **kwargs, reserve_quota=False)
 
     def mark_dispatched(self, request_id):
         with self.tx() as db:
@@ -295,6 +323,15 @@ class Store:
                 return False
             if actual < 0:
                 raise Fault("negative_usage")
+            if req['metering'] == 'actual':
+                for table, row_id in [('users', req['user_id']), ('keys', req['key_id'])]:
+                    db.execute(f'UPDATE {table} SET spent=spent+? WHERE id=?', (actual, row_id))
+                db.execute('UPDATE requests SET status=?,actual=?,input_tokens=?,output_tokens=?,response=?,elapsed_ms=?,error=? WHERE id=?',
+                           (status, actual, input_tokens, output_tokens, canonical(response) if response else None,
+                            int((time.time()-req['created'])*1000), reason or None, request_id))
+                db.execute("INSERT INTO ledger(request_id,event,points,created) VALUES(?,'settle',?,?)", (request_id, actual, time.time()))
+                self.audit(db, actor, 'usage.settle', request_id, dict(actual=actual, status=status, metering='actual'))
+                return True
             if actual > req["reserved"] and not allow_excess:
                 db.execute("UPDATE requests SET status='reconciliation',error='usage_exceeds_reservation' WHERE id=?", (request_id,))
                 return False

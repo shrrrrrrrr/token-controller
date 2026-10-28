@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from .branding import VENDORS, vendor_info
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = {
@@ -23,7 +24,7 @@ MAX_CATALOG_BYTES = 128 * 1024
 MAX_MODELS = 64
 MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,95}\Z")
 UPSTREAM_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,159}\Z")
-CATALOG_FIELDS = {"id", "display_name", "kind", "deployment_status", "description", "upstream_model"}
+CATALOG_FIELDS = {"id", "display_name", "kind", "deployment_status", "description", "upstream_model", "vendor"}
 
 
 class ModelCatalogError(ValueError):
@@ -62,6 +63,8 @@ def _validate_catalog(raw):
         seen.add(model_id)
         if not _catalog_text(item.get("display_name"), 80):
             raise ModelCatalogError("model_catalog_invalid_display_name")
+        if 'vendor' in item and (not isinstance(item['vendor'], str) or item['vendor'] not in VENDORS):
+            raise ModelCatalogError('model_catalog_invalid_vendor')
         if item.get("kind") not in ("text", "video"):
             raise ModelCatalogError("model_catalog_invalid_kind")
         # Readiness comes from the runtime health check, never from this file.
@@ -73,7 +76,7 @@ def _validate_catalog(raw):
                 not isinstance(item["upstream_model"], str)
                 or UPSTREAM_MODEL.fullmatch(item["upstream_model"]) is None):
             raise ModelCatalogError("model_catalog_invalid_upstream_model")
-        result.append(dict(item, description=item.get("description", ""),
+        result.append(dict(item, **vendor_info(model_id, item.get('vendor')), description=item.get("description", ""),
                            status=item["deployment_status"], callable=False,
                            real_control_enabled=False, health="unverified",
                            source="private_local_catalog_not_live"))
@@ -95,8 +98,10 @@ def load_model_catalog(path=None, cloud_preview=False):
                      description="仅用于本地演示，未核验实际模型服务。",
                      deployment_status="simulation", status="simulation", callable=False,
                      real_control_enabled=False, health="unverified", source="synthetic_catalog_only")
-                for model_id, label, kind in (("qwen3-32b", "Qwen3-32B（演示）", "text"),
-                                             ("h3", "H3（演示）", "video"))]
+                for model_id, label, kind in (("glm5.3-flash", "GLM-5.3-Flash", "text"),
+                                             ("qwen3.8-flash-next", "Qwen3.8-Flash-Next", "text"),
+                                             ("qwen3-32b", "Qwen3-32B", "text"),
+                                             ("h3", "MiniMax-H3", "video"))]
     try:
         with Path(path).open("rb") as stream:
             payload = stream.read(MAX_CATALOG_BYTES + 1)
@@ -136,7 +141,7 @@ def authorized_catalog(who, catalog):
         return []
     allowed = _model_grants(who["user"]) & _model_grants(who["key"])
     fields = ("id", "display_name", "kind", "description", "deployment_status", "status", "source")
-    return [dict({field: item[field] for field in fields}, authorized=item["id"] in allowed,
+    return [dict({field: item[field] for field in fields}, **vendor_info(item['id'], item.get('vendor')), authorized=item["id"] in allowed,
                  callable=False, real_control_enabled=False, health="unverified")
             for item in catalog if role == "admin" or item["id"] in allowed]
 

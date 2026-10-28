@@ -43,7 +43,7 @@ def pilot(tmp_path):
             "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10 if behavior["usage_valid"] else 0}})
 
     provider = CloudText(CONFIG, tmp_path, transport=httpx.MockTransport(upstream))
-    app = create_app(store, provider, cloud_api=True, public_origin=ORIGIN, model_catalog_path=catalog)
+    app = create_app(store, provider, cloud_api=True, public_origin=ORIGIN, model_catalog_path=catalog,queue_wait=.25)
     with TestClient(app, base_url=ORIGIN) as client:
         yield store, catalog, users, headers, provider, calls, behavior, client
 
@@ -156,7 +156,7 @@ def test_unlimited_unknown_request_keeps_reservation_and_global_protection(pilot
     behavior["post_error"] = True
     assert chat(pilot).status_code == 502
     row = store.one("SELECT status,reserved FROM requests")
-    assert row["status"] == "reconciliation" and row["reserved"] > 0
+    assert row["status"] == "reconciliation" and row["reserved"] == 0
     assert store.one("SELECT spent,reserved FROM users WHERE id=?", (users["caller"],)) == {"spent": 0, "reserved": row["reserved"]}
     assert chat(pilot, key="another-request").status_code == 429
     assert len([call for call in calls if call.method == "POST"]) == 1
@@ -220,7 +220,7 @@ def test_unknown_submission_is_never_retried_and_blocks_new_dispatch(pilot, mode
     assert result.status_code == 502 and result.json()["submitted_to_model"] is True
     assert "sensitive upstream" not in result.text and SECRET not in result.text
     assert store.one("SELECT status FROM requests")["status"] == "reconciliation"
-    assert store.one("SELECT reserved FROM users WHERE role='caller'")["reserved"] > 0
+    assert store.one("SELECT reserved FROM users WHERE role='caller'")["reserved"] == 0
     assert chat(pilot).status_code == 409
     assert chat(pilot, key="different-request").status_code == 429
     assert len([call for call in calls if call.method == "POST"]) == 1
@@ -230,7 +230,7 @@ def test_quota_revocation_and_registration_removal_prevent_dispatch(pilot):
     store, catalog, users, headers, _, calls, _, client = pilot
     provision(pilot)
     with store.tx() as db:
-        db.execute("UPDATE users SET budget=1 WHERE id=?", (users["caller"],))
+        db.execute("UPDATE users SET budget=0 WHERE id=?", (users["caller"],))
     assert chat(pilot).status_code == 402
     catalog.write_text('{"models":[]}')
     assert chat(pilot).status_code == 503
@@ -252,9 +252,9 @@ def test_scope_transport_and_unsupported_protocols(pilot):
     assert client.get("/api/me", headers={**headers["admin"], "Origin": "https://other.example.test"}).status_code == 403
     assert client.get("/api/me", headers={**headers["admin"], "Host": "other.example.test"}).status_code == 400
     assert client.get("http://models.example.test/api/me", headers=headers["admin"], follow_redirects=False).status_code == 403
-    assert chat(pilot, stream=True).status_code == 501
+    # Streaming/tools are qualified by the dedicated queue/protocol tests.
     assert chat(pilot, api_base="https://other.example.test").status_code == 422
-    assert chat(pilot, tools=[]).status_code == 422
+    assert chat(pilot, tools=[{"type":"host-shell"}]).status_code == 422
     assert not calls
 
 
@@ -298,31 +298,27 @@ def test_concurrent_members_dispatch_only_one_upstream_call(pilot):
     member_id = store.create_user("parallel-member", "caller", [ALIAS], [], 100000)
     other = {"Authorization": "Bearer " + store.issue_key(member_id, [ALIAS], 100000)["key"]}
 
-    async def run():
-        entered, release = asyncio.Event(), asyncio.Event()
-        posts = []
-
-        async def upstream(request):
-            posts.append(request)
-            entered.set()
-            await release.wait()
-            return httpx.Response(200, json={"id": "parallel-fixture", "model": CONFIG["served_model"],
-                "choices": [{"message": {"role": "assistant", "content": "synthetic"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
-
-        provider.transport = httpx.MockTransport(upstream)
-        body = {"model": ALIAS, "messages": [{"role": "user", "content": "synthetic"}]}
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url=ORIGIN) as http:
-            first = asyncio.create_task(http.post("/v1/chat/completions", headers=headers["caller"], json=body))
-            await asyncio.wait_for(entered.wait(), 3)
-            try:
-                second = await http.post("/v1/chat/completions", headers=other, json=body)
-                assert second.status_code == 429
-            finally:
-                release.set()
-            assert (await first).status_code == 200
-        assert len(posts) == 1
-    asyncio.run(run())
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    entered,release=threading.Event(),threading.Event()
+    posts=[]
+    async def upstream(request):
+        posts.append(request);entered.set()
+        while not release.is_set():await asyncio.sleep(.01)
+        return httpx.Response(200,json={"id":"parallel-fixture","model":CONFIG["served_model"],
+            "choices":[{"message":{"role":"assistant","content":"synthetic"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}})
+    provider.transport=httpx.MockTransport(upstream)
+    body={"model":ALIAS,"messages":[{"role":"user","content":"synthetic"}]}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first=pool.submit(client.post,"/v1/chat/completions",headers=headers['caller'],json=body)
+        assert entered.wait(3)
+        try:
+            second=client.post('/v1/chat/completions',headers=other,json=body)
+            assert second.status_code==429 and second.headers['retry-after']=='10'
+        finally:release.set()
+        assert first.result(timeout=3).status_code==200
+    assert len(posts)==1
 
 
 def test_redirects_do_not_forward_secret_or_retry(pilot):

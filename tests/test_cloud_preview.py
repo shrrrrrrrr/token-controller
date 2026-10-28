@@ -21,7 +21,7 @@ def preview(tmp_path):
         ids[role] = store.create_user(role, role, [] if role == "admin" else [MODEL["id"]], [], 10000)
         token = store.issue_key(ids[role], [] if role == "admin" else [MODEL["id"]], 10000)["key"]
         headers[role] = {"Authorization": "Bearer " + token}
-    app = create_app(store, cloud_preview=True, public_origin=ORIGIN, model_catalog_path=catalog)
+    app = create_app(store, cloud_preview=True, public_origin=ORIGIN, model_catalog_path=catalog,model_requests_enabled=True)
     with TestClient(app, base_url=ORIGIN) as client:
         yield store, catalog, ids, headers, client
 

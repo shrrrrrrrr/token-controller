@@ -32,7 +32,7 @@ def main():
                         help='已验收的同时推理数；真实服务默认1，本地模拟默认3，工作流上限固定3')
     parser.add_argument('--native-context',action='store_true',
                         help='为已验收的固定llama.cpp引擎启用模板分词检查；只用于cloud-api')
-    parser.add_argument('--tool-proxy-config',type=Path,help='显式启用固定TLS loopback工具的私有平台会话入口')
+    parser.add_argument('--tool-proxy-config',type=Path,action='append',help='显式启用固定TLS loopback工具，可重复指定独立私有配置')
     args = parser.parse_args()
     if args.native_context and not args.cloud_api:
         raise SystemExit('--native-context requires --cloud-api')
@@ -40,9 +40,8 @@ def main():
     if args.tool_proxy_config:
         if not args.cloud_api or not args.web_accounts:
             raise SystemExit('--tool-proxy-config requires --cloud-api and --web-accounts')
-        from .tool_proxy import ToolProxy,load_config
-        config,context=load_config(args.tool_proxy_config)
-        tool_proxy=ToolProxy(config,ssl_context=context)
+        from .tool_proxy import load_proxies
+        tool_proxy=[proxy for path in args.tool_proxy_config for proxy in load_proxies(path)]
     runtime_client=None
     if args.runtime_agent_config:
         if not args.cloud_api:

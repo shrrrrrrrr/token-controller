@@ -93,7 +93,7 @@ def _crypto(key,message,*,signature=None,workdir=None,openssl='/usr/bin/openssl'
 FIELDS={'v','aud','sub','username','role','csrf','method','target','body_sha256','iat','exp','nonce'}
 
 
-def validate(claims,audience,method,target,body,now=None):
+def validate(claims,audience,method,target,body,now=None,*,body_digest=None):
     now=time.time() if now is None else now
     require(isinstance(claims,dict) and set(claims)==FIELDS and claims['v']==1)
     require(isinstance(claims['sub'],str) and re.fullmatch('usr_[a-f0-9]{32}',claims['sub']) is not None)
@@ -103,8 +103,10 @@ def validate(claims,audience,method,target,body,now=None):
     require(type(claims['iat']) is int and type(claims['exp']) is int
             and 0<claims['exp']-claims['iat']<=15 and claims['iat']<=now+3 and now<claims['exp'])
     require(isinstance(claims['nonce'],str) and re.fullmatch('[a-f0-9]{32}',claims['nonce']) is not None)
-    require(claims['aud']==audience and claims['method']==method and method in ('GET','HEAD','POST')
-            and claims['target']==safe_target(target) and claims['body_sha256']==hashlib.sha256(body).hexdigest())
+    require(body_digest is None or isinstance(body_digest,str) and re.fullmatch('[a-f0-9]{64}',body_digest) is not None)
+    require(claims['aud']==audience and claims['method']==method and method in ('GET','HEAD','POST','PATCH')
+            and claims['target']==safe_target(target) and claims['body_sha256']==
+            (body_digest if body_digest is not None else hashlib.sha256(body).hexdigest()))
     return claims
 
 
@@ -125,6 +127,27 @@ def verify(key,token,audience,method,target,body=b'',*,now=None,workdir=None,ope
         require(version=='v1')
         raw,sig=_decode(payload),_decode(signature);require(len(sig)==64 and len(raw)<=4096)
         claims=validate(json.loads(raw),audience,method,target,body,now)
+        _crypto(key,raw,signature=sig,workdir=workdir,openssl=openssl)
+        return claims
+    except (ValueError,KeyError,TypeError,UnicodeError):
+        raise IdentityError('invalid_platform_tool_identity') from None
+
+
+def verify_envelope(key,token,audience,method,target,*,now=None,workdir=None,openssl='/usr/bin/openssl'):
+    """Authenticate headers at arrival. Caller MUST compare the full received body digest.
+
+    This permits a bounded body to arrive after expiry without accepting a request
+    whose headers were already expired. No application action may precede the digest check.
+    """
+    try:
+        require(isinstance(token,str) and len(token)<=6000)
+        version,payload,signature=token.split('.')
+        require(version=='v1')
+        raw,sig=_decode(payload),_decode(signature);require(len(sig)==64 and len(raw)<=4096)
+        claims=json.loads(raw)
+        require(isinstance(claims,dict) and isinstance(claims.get('body_sha256'),str)
+                and re.fullmatch('[a-f0-9]{64}',claims['body_sha256']) is not None)
+        validate(claims,audience,method,target,b'',now,body_digest=claims['body_sha256'])
         _crypto(key,raw,signature=sig,workdir=workdir,openssl=openssl)
         return claims
     except (ValueError,KeyError,TypeError,UnicodeError):

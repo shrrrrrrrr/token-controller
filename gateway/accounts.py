@@ -108,7 +108,7 @@ class WebAccounts:
         if request.headers.get('origin') != expected:
             raise Fault('origin_forbidden', 403)
         token = request.headers.get('x-csrf-token', '')
-        if not session or not hmac.compare_digest(token, session['csrf']):
+        if not session or not hmac.compare_digest(token.encode('utf-8'), session['csrf'].encode('ascii')):
             raise Fault('csrf_required', 403)
 
     def issue_session(self, user_id=None, previous=None, account_hash=None):

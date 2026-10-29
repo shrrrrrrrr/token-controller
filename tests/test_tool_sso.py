@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from gateway.accounts import WebAccounts
 from gateway.app import create_app
 from gateway.store import Store
-from gateway.tool_proxy import ToolProxy,load_config
+from gateway.tool_proxy import ToolProxy,CourtProxy,load_config
 from integrations.platform_identity import IdentityError,issue,verify,safe_target
 from integrations.simcourt_platform_auth import Ownership,make_handler
 
@@ -238,3 +238,94 @@ def test_real_loopback_tls_with_verified_tool_server_name(platform,keys,tmp_path
         assert client.get('/tools/case-tool/').status_code==502
         proxy.config['server_name']='tool.example.test';proxy.ssl_context=ssl.create_default_context()
         assert client.get('/tools/case-tool/').status_code==502
+
+
+@pytest.fixture
+def court_platform(tmp_path,keys):
+    private,public=keys
+    store=Store(tmp_path/'two-tools.sqlite',seed_demo=False)
+    admin=store.create_user('Synthetic admin','admin',[],[],-1)
+    caller=store.create_user('Synthetic member','caller',[],[],-1)
+    web=WebAccounts(store,public_origin=ORIGIN)
+    web.setup(admin,'synthetic-admin',PASSWORD);web.setup(caller,'synthetic-member',PASSWORD)
+    legacy=ToolProxy({'tool_id':'case-tool','upstream':'https://127.0.0.1:28443',
+        'server_name':'tool.example.test','private_key':str(private)},
+        transport=httpx.MockTransport(lambda req:httpx.Response(200,headers={'content-type':'text/html',
+            'x-platform-tool-bridge':'1'},stream=Chunks(b'<html><head></head><body>Original</body></html>'))),openssl=OPENSSL)
+    config=tmp_path/'two-tools.json'
+    config.write_text(json.dumps({'tools':[
+        {'id':'case-tool','url':'https://tool.example.test/','embed':False},
+        {'id':'court-transcript','url':'https://transcript.example.test/','embed':False}]}))
+    observed=[]
+    def upstream(request):
+        assert not any(name in request.headers for name in ('cookie','authorization','x-api-key','x-forwarded-user'))
+        claims=verify(public,request.headers['x-platform-tool-identity'],'tool:court-transcript',request.method,
+            request.url.raw_path.decode(),request.content,openssl=OPENSSL)
+        observed.append((claims,len(request.content),request.headers.get('range')))
+        headers={'x-platform-tool-bridge':'1','set-cookie':'not-forwarded=secret'}
+        if request.url.path.endswith('/media'):
+            headers.update({'content-type':'video/mp4','accept-ranges':'bytes',
+                'content-range':'bytes 0-5242879/10485760','content-length':str(5*1024*1024)})
+            return httpx.Response(206,headers=headers,stream=Chunks(b'x'*(5*1024*1024)))
+        if request.url.path=='/':
+            headers['content-type']='text/html'
+            return httpx.Response(200,headers=headers,stream=Chunks(b'<html><head></head><body>Court</body></html>'))
+        headers['content-type']='application/json'
+        return httpx.Response(200,headers=headers,stream=Chunks(b'{"ok":true}'))
+    court=CourtProxy({'tool_id':'court-transcript','upstream':'https://127.0.0.1:28444',
+        'server_name':'transcript.example.test','private_key':str(private)},
+        transport=httpx.MockTransport(upstream),openssl=OPENSSL)
+    app=create_app(store,web_accounts=True,project_tools_path=config,tool_proxy=[legacy,court],background=False)
+    with TestClient(app,base_url='https://localhost') as client:
+        yield store,client,observed,court,legacy
+
+
+def test_court_and_existing_tool_have_separate_routes_and_limits(court_platform):
+    store,client,observed,court,legacy=court_platform
+    assert client.get('/tools/court-transcript/',follow_redirects=False).status_code==303
+    headers=sign_in(client)
+    assert client.get('/tools/case-tool/').status_code==200
+    result=client.get('/tools/court-transcript/')
+    assert result.status_code==200 and '/tools/court-transcript/__bridge.js' in result.text
+    assert 'media-src' in result.headers['content-security-policy']
+    assert 'media-src' not in client.get('/').headers['content-security-policy']
+    rows=client.get('/api/project-tools').json()['tools']
+    assert {row['url'] for row in rows}=={'/tools/case-tool/','/tools/court-transcript/'}
+    data=b'a'*(4*1024*1024)
+    path='/tools/court-transcript/api/uploads/'+'a'*32+'/parts/0'
+    result=client.post(path,headers={**headers,'Content-Type':'application/octet-stream',
+        'Authorization':'Bearer do-not-forward','X-Forwarded-User':'forged'},content=data)
+    assert result.status_code==200,result.text
+    assert observed[-1][1]==len(data)
+    assert client.post('/tools/case-tool/api/jobs',headers=headers,content=data).status_code==413
+    assert client.post('/api/not-a-tool',headers=headers,content=data).status_code==413
+    assert client.post(path,headers=headers,content=data+b'!').status_code==413
+    assert client.post('/tools/court-transcript/api/tasks',headers=headers,content=b'{}').status_code==413
+    invalid_headers=[(b'origin',b'https://localhost'),(b'x-csrf-token',b'\xff')]
+    assert client.post('/tools/court-transcript/api/uploads',headers=invalid_headers,content=b'{}').status_code==403
+
+
+def test_court_patch_range_and_streamed_large_response(court_platform):
+    store,client,observed,court,legacy=court_platform
+    headers=sign_in(client)
+    path='/tools/court-transcript/api/tasks/'+'a'*32
+    result=client.patch(path+'/segments/seg-1',headers=headers,json={'text':'逐字核听'})
+    assert result.status_code==200,result.text
+    assert observed[-1][0]['method']=='PATCH'
+    result=client.get(path+'/media',headers={'Range':'bytes=0-'})
+    assert result.status_code==206 and len(result.content)==5*1024*1024
+    assert result.headers['accept-ranges']=='bytes' and 'content-range' in result.headers
+    assert 'set-cookie' not in result.headers and observed[-1][2]=='bytes=0-'
+    assert client.get(path+'/media',headers={'Range':'bytes=0-1,4-6'}).status_code==416
+
+
+@pytest.mark.parametrize('state',['expired','disabled','pending'])
+def test_court_upload_rechecks_platform_authority_before_forward(court_platform,state):
+    store,client,observed,court,legacy=court_platform
+    headers=sign_in(client)
+    with store.tx() as db:
+        if state=='expired':db.execute('UPDATE web_sessions SET expires=0')
+        if state=='disabled':db.execute("UPDATE users SET active=0 WHERE role='caller'")
+        if state=='pending':db.execute("UPDATE login_accounts SET status='pending' WHERE username='synthetic-member'")
+    result=client.post('/tools/court-transcript/api/uploads',headers=headers,json={})
+    assert result.status_code in (401,403) and not observed

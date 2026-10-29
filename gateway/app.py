@@ -174,17 +174,24 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     store = store or Store(Path(__file__).parents[1] / ".state" / "gateway.sqlite", seed_demo=not public_mode)
     provider = provider or (UnavailableText() if cloud_preview else DemoText())
     service = Service(store, provider, control_url, control_token, control_transport)
+    tool_proxies=tuple(tool_proxy) if isinstance(tool_proxy,(list,tuple)) else (tool_proxy,) if tool_proxy else ()
     if tool_proxy is not None and (not web_accounts or cloud_preview):
         raise ValueError('platform tool proxy requires web accounts outside cloud-preview mode')
-    if tool_proxy is not None and len([t for t in configured_tools(project_tools_path) if t['id']==tool_proxy.tool_id])!=1:
-        raise ValueError('platform tool proxy must match exactly one registered project tool')
+    if len(tool_proxies)>8 or len({p.tool_id for p in tool_proxies})!=len(tool_proxies):
+        raise ValueError('duplicate platform tool proxy identity')
+    for proxy in tool_proxies:
+        if len([t for t in configured_tools(project_tools_path) if t['id']==proxy.tool_id])!=1:
+            raise ValueError('platform tool proxy must match exactly one registered project tool')
 
     def tools_for_ui():
         rows=configured_tools(project_tools_path)
         for row in rows:
-            if tool_proxy is not None and row['id']==tool_proxy.tool_id:
-                row.update(url=tool_proxy.prefix+'/',origin='self',embed=False,authentication='platform_session',
-                           health='configured',execution='held',description='使用平台账号，无需再次登录')
+            proxy=next((p for p in tool_proxies if row['id']==p.tool_id),None)
+            if proxy is not None:
+                court=proxy.kind=='court-transcript'
+                row.update(url=proxy.prefix+'/',origin='self',embed=False,authentication='platform_session',
+                           health='configured',execution='campus-worker' if court else 'held',
+                           description='使用平台账号；视频在校内服务器处理' if court else '使用平台账号，无需再次登录')
         return rows
 
     def registered_models():
@@ -267,10 +274,12 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
                     ("/v1/models", "GET"), ("/v1/chat/completions", "POST"), ("/v1/messages", "POST")} and not (
                     path.startswith('/v1/jobs') and request.method in ('GET','POST') or path.startswith('/v1/calls/') and request.method=='GET'):
                 return JSONResponse({"error": {"code": "protocol_not_supported_in_cloud_pilot"}}, status_code=501)
+        current_proxy=next((p for p in tool_proxies if request.scope['path'].startswith(p.prefix+'/')),None)
+        body_max=current_proxy.request_maximum if current_proxy else 262144
         length = request.headers.get("content-length")
-        if length and (not length.isdigit() or int(length) > 262144):
+        if length and (not length.isdigit() or int(length) > body_max):
             return JSONResponse({"error": {"code": "body_too_large"}}, status_code=413)
-        if request.method in ("POST", "PATCH", "PUT"):
+        if request.method in ("POST", "PATCH", "PUT") and not (current_proxy and current_proxy.kind=='court-transcript'):
             raw = bytearray()
             async for chunk in request.stream():
                 raw.extend(chunk)
@@ -283,6 +292,8 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         response.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                                  "Referrer-Policy": "no-referrer",
                                  "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src "+frame_source+"; frame-ancestors 'none'; base-uri 'none'"})
+        if current_proxy and current_proxy.kind=='court-transcript':
+            response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         if (request.url.path.startswith('/background-assets/') and response.status_code == 200
                 and response.headers.get('content-type') in ('image/jpeg', 'image/png')):
             response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
@@ -319,7 +330,8 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         app.state.web_accounts = web
         if tool_proxy is not None:
             from .tool_proxy import mount_tool_proxy
-            mount_tool_proxy(app,store,web,tool_proxy)
+            for proxy in tool_proxies:
+                mount_tool_proxy(app,store,web,proxy)
 
     def roles(*allowed):
         def check(who=Depends(identity)):

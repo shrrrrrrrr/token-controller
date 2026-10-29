@@ -112,6 +112,8 @@ def account_guide(store, who, text_source, cloud_preview=False, cloud_api=False,
     if web_accounts and 'account' in pages:
         steps += [dict(title='我的账号',text='点击右上角联系人图标查看账号、修改密码或退出；改密先验证原密码，验证通过后设置新密码',target='account')]
     steps += [dict(title='工作台导航',text='左上标志返回仪表台，页面更新使用浏览器刷新；模型列表显示厂商标志',target='overview')]
+    if 'tools' in pages:
+        steps += [dict(title='项目工具',text='已配置的受信工具使用获准的平台账号；庭录分块传输视频到校内服务器，任务按账号隔离。入口配置不代替部署验收，中文庭审和角色识别仍需核听。未配置代理的工具保持原入口及原权限',target='tools')]
     if role == 'admin':
         steps += [dict(title='邀请码',text='成员与权限中生成24小时有效、限使用一次的邀请码，填写有效码可直接注册为默认权限普通成员；不填则等待审批',target='invitations'),dict(title='全站背景',text='在工具与设置的背景设置中选图，保存后登录页和所有成员统一使用；已打开的页面会自动同步',target='appearance')]
     if 'tasks' in pages:

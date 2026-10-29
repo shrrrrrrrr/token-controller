@@ -1,6 +1,6 @@
 # Project tools with platform login
 
-Version 0.11 adds an **explicit opt-in** session entry for one reviewed tool.
+Version 0.11 adds an **explicit opt-in** session entry for reviewed tools.
 Normal project links keep their own authentication. Configuration alone is not
 evidence that a deployed tool or its model workflow is available.
 
@@ -54,6 +54,24 @@ may be service- or root-owned and cannot be writable by other users. Register
 the same tool ID in the private project-tool catalog. Enable with
 `--tool-proxy-config <path> --cloud-api --web-accounts`; the other cloud launch
 arguments remain required. Default startup does not attach a tool.
+
+Version 0.11.1 accepts repeated `--tool-proxy-config` arguments (up to eight
+distinct, registered IDs), or a private `{"tools": [ ... ]}` configuration.
+The original five-field single-tool configuration stays compatible. Add
+`"kind": "court-transcript"` only for the reviewed transcription backend.
+This profile permits 4 MiB signed upload parts and PATCH edits, streams media
+and single-byte-range responses, and does not proxy full-file `/api/tasks`
+uploads. Its backend must validate assertions and task ownership. The original
+SimCourt profile and every other platform endpoint retain the 256 KiB limit.
+The larger Nginx limit must be scoped to the exact transcription prefix;
+configuration and local tests do not mean this profile is deployed or qualified.
+
+For slow upload parts the transcription verifier authenticates the signed
+envelope and consumes its nonce at header arrival, then compares the complete
+bounded body digest before invoking any application route. An already expired
+envelope is rejected before receiving its body. The streaming TLS sidecar does
+not run another queue or load a model. The original SimCourt verifier keeps its
+existing full-body validation behavior.
 
 On the tool host, install the reviewed `integrations/platform_identity.py` and
 `integrations/simcourt_platform_auth.py`. Replace the legacy handler factory with

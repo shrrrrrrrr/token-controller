@@ -32,9 +32,17 @@ def main():
                         help='已验收的同时推理数；真实服务默认1，本地模拟默认3，工作流上限固定3')
     parser.add_argument('--native-context',action='store_true',
                         help='为已验收的固定llama.cpp引擎启用模板分词检查；只用于cloud-api')
+    parser.add_argument('--tool-proxy-config',type=Path,help='显式启用固定TLS loopback工具的私有平台会话入口')
     args = parser.parse_args()
     if args.native_context and not args.cloud_api:
         raise SystemExit('--native-context requires --cloud-api')
+    tool_proxy=None
+    if args.tool_proxy_config:
+        if not args.cloud_api or not args.web_accounts:
+            raise SystemExit('--tool-proxy-config requires --cloud-api and --web-accounts')
+        from .tool_proxy import ToolProxy,load_config
+        config,context=load_config(args.tool_proxy_config)
+        tool_proxy=ToolProxy(config,ssl_context=context)
     runtime_client=None
     if args.runtime_agent_config:
         if not args.cloud_api:
@@ -165,6 +173,7 @@ def main():
             app = create_app(store, provider=provider, cloud_preview=args.cloud_preview, cloud_api=args.cloud_api, public_origin=args.public_origin,
                              runtime_client=runtime_client,inference_slots=args.inference_slots,
                              web_accounts=args.web_accounts,
+                             tool_proxy=tool_proxy,
                              model_catalog_path=catalog_path,
                              project_tools_path=args.state / "project-tools.local.json")
             print(f"Cloud mode: {'text pilot' if args.cloud_api else 'preview'} | loopback:{args.port} | runtime={'agent configured' if runtime_client else 'disabled'}", flush=True)

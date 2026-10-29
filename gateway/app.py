@@ -156,7 +156,7 @@ class Service:
 
 
 def create_app(store=None, provider=None, control_url=None, control_token=None, control_transport=None, background=True, project_tools_path=None,
-               cloud_preview=False, public_origin=None, model_catalog_path=None, cloud_api=False, web_accounts=False, runtime_client=None, model_requests_enabled=False, inference_slots=None, queue_wait=25):
+               cloud_preview=False, public_origin=None, model_catalog_path=None, cloud_api=False, web_accounts=False, runtime_client=None, model_requests_enabled=False, inference_slots=None, queue_wait=25, tool_proxy=None):
     origin_host = None
     public_mode = cloud_preview or cloud_api
     if cloud_api:
@@ -174,6 +174,18 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
     store = store or Store(Path(__file__).parents[1] / ".state" / "gateway.sqlite", seed_demo=not public_mode)
     provider = provider or (UnavailableText() if cloud_preview else DemoText())
     service = Service(store, provider, control_url, control_token, control_transport)
+    if tool_proxy is not None and (not web_accounts or cloud_preview):
+        raise ValueError('platform tool proxy requires web accounts outside cloud-preview mode')
+    if tool_proxy is not None and len([t for t in configured_tools(project_tools_path) if t['id']==tool_proxy.tool_id])!=1:
+        raise ValueError('platform tool proxy must match exactly one registered project tool')
+
+    def tools_for_ui():
+        rows=configured_tools(project_tools_path)
+        for row in rows:
+            if tool_proxy is not None and row['id']==tool_proxy.tool_id:
+                row.update(url=tool_proxy.prefix+'/',origin='self',embed=False,authentication='platform_session',
+                           health='configured',execution='held',description='使用平台账号，无需再次登录')
+        return rows
 
     def registered_models():
         try:
@@ -266,7 +278,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
                     return JSONResponse({"error": {"code": "body_too_large"}}, status_code=413)
             request._body = bytes(raw)
         response = await call_next(request)
-        tool_origins = sorted({t['origin'] for t in configured_tools(project_tools_path) if t['embed']})
+        tool_origins = sorted({t['origin'] for t in tools_for_ui() if t['embed']})
         frame_source = ' '.join(tool_origins) if tool_origins else "'none'"
         response.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                                  "Referrer-Policy": "no-referrer",
@@ -305,6 +317,9 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
         web = WebAccounts(store, public_origin=public_origin if public_mode else None)
         identity = mount_accounts(app, store, web, registered_models)
         app.state.web_accounts = web
+        if tool_proxy is not None:
+            from .tool_proxy import mount_tool_proxy
+            mount_tool_proxy(app,store,web,tool_proxy)
 
     def roles(*allowed):
         def check(who=Depends(identity)):
@@ -473,7 +488,7 @@ def create_app(store=None, provider=None, control_url=None, control_token=None, 
 
     @app.get('/api/project-tools')
     def project_tools(who=Depends(identity)):
-        return {'tools': configured_tools(project_tools_path), 'credentials_forwarded': False}
+        return {'tools': tools_for_ui(), 'credentials_forwarded': False}
 
     @app.get('/api/guide')
     def guide(who=Depends(identity)):

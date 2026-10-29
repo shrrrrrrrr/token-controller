@@ -1,7 +1,12 @@
 // Password/session UI. Secrets stay in the current document's memory only.
+export function toolReturnPath(search){
+ const value=new URLSearchParams(search).get('next');
+ return typeof value==='string'&&/^\/tools\/[a-z][a-z0-9-]{0,39}\/$/.test(value)?value:null;
+}
 export function createAccountsUI(options){
  const {api,$,esc,field,table,panel,top,notice,num,date,modelChecks,selectedModels,quotaControls,selectedBudget,grantEditor,action,toast,render,navigate}=options;
  let editingKey=null,passwordDialog=null;
+ async function authenticated(){const identity=await options.onAuthenticated();const next=toolReturnPath(location.search);if(next&&identity?.account?.status==='approved')location.assign(next)}
  function closeMenu(){const menu=$('#account-popover');if(menu)menu.hidden=true;$('#identity')?.setAttribute('aria-expanded','false')}
  document.addEventListener('click',event=>{if(!event.target.closest('.account-control'))closeMenu()});
  document.addEventListener('keydown',event=>{if(event.key==='Escape'){closeMenu();$('#identity')?.focus()}});
@@ -55,11 +60,11 @@ export function createAccountsUI(options){
     if(registering||claiming){if(body.password!==$('#auth-confirm').value)throw new Error('两次密码输入不一致');if(registering){body.display_name=$('#auth-display').value;const invitation=$('#auth-invitation').value.trim();if(invitation)body.invitation_code=invitation}else body.code=$('#auth-code').value}
     const result=await api('/api/auth/'+(registering?'register':claiming?'claim':'login'),'POST',body);
     if(registering||claiming){await login('login',registering?(result.status==='approved'?'注册成功，账号已开通，请登录':'注册成功，请登录查看审批状态'):'账号设置成功，请使用新账密登录。');return}
-    options.setCSRF(result.csrf_token);await options.onAuthenticated();
+    options.setCSRF(result.csrf_token);await authenticated();
    }catch(error){$('#auth-error').textContent=error.message}
   })});
  }
- async function restore(){const state=await csrfContext();if(state.authenticated){try{await options.onAuthenticated();return}catch{/* Expired/disabled sessions return to the sign-in form. */}}await login('login','',state)}
+ async function restore(){const state=await csrfContext();if(state.authenticated){try{await authenticated();return}catch{/* Expired/disabled sessions return to the sign-in form. */}}await login('login','',state)}
  async function logout(){await api('/api/auth/logout','POST',{});options.setCSRF('');await login()}
  async function profile(){
   const data=await api('/api/account');
